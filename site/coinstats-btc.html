@@ -505,6 +505,7 @@ body.view-simple .adv{ display:none !important; }
           for a bet that costs its full stake on a loss. Only used when Size above is set to Kelly-sized; still capped by the maximum risk per trade
           set in Paper trading, and still throttled down after a losing streak like the other sizing modes.
         </div>
+        <div class="prob-meta" id="kellyPreview" style="margin:0 0 10px; font-weight:600;">&mdash;</div>
       </div>
 
       <div class="card collapsed adv" id="card-trendstreak">
@@ -3274,6 +3275,7 @@ function tick(){
   renderOdds();
   if (settleDue()) renderLedger();
   try { shadowCheckCap(); renderShadow(); } catch (e) { /* rehearsal feature only -- never let it break the main tick */ }
+  try { renderKellyPreview(); } catch (e) { /* display only -- never let it break the main tick */ }
   recordWindow();
   autoCloseCheck();
   $('trendNote').textContent = trendNoteText();
@@ -3946,6 +3948,51 @@ function gateChecklist(side, o, left){
   return out;
 }
 
+/* Fractional Kelly for a contract that pays $1 on a win, nothing on a loss:
+   f* = (q - p) / (1 - p), where q is the model's own probability for this side and p is the
+   price being edged against. Derived from the standard Kelly formula f* = (b*q - (1-q)) / b
+   with b = (1-p)/p (payout odds on a win).
+   p must be a genuinely independent read of the odds, not contractPrice(q) itself -- that's
+   just q rounded to the nearest cent, so comparing q to its own rounding always reads as
+   ~zero edge and Kelly would floor to 1 contract on every trade, defeating the point of
+   sizing by edge at all. Prefer Kalshi's real ask price when a live quote exists for this
+   strike and window (the same reference the "Edge over Kalshi" checklist row already uses);
+   otherwise fall back to pManual, the slower momentum-free baseline computed elsewhere in
+   this file -- so what actually drives the bet size is momentum's lift over your own sober,
+   non-momentum read of the odds, not a comparison against yourself.
+   Shared by autoCheck (which actually places the bet) and the live Kelly preview below it (which
+   only displays what this math currently says, whether or not Size is set to Kelly or a bet is
+   about to fire) -- same formula, same risk cap, so the preview never says something different
+   from what an auto-trade would actually do. */
+function kellySizeNow(side, o, throttle){
+  var qModel = side === 'above' ? o.pAbove : o.pBelow, cprice = contractPrice(qModel);
+  var kal = kalshiSnapshot(side, o);
+  var refPrice = (kal && kal.quoted && kal.ask != null) ? clamp(kal.ask + kal.fee, 0.01, 0.99) : contractPrice(side === 'above' ? o.pManual : 1 - o.pManual);
+  var fStar = Math.max(0, (qModel - refPrice) / (1 - refPrice));
+  var kFrac = +$('kellyFraction').value || 0.25;
+  var kellyStake = paper.balance * kFrac * fStar;
+  var contracts = Math.max(1, Math.round((kellyStake / cprice) * (throttle == null ? 1 : throttle)));
+  var maxRiskPct = +$('maxRiskPct').value || 0, riskCapped = false;
+  if (maxRiskPct > 0){
+    var maxContracts = Math.max(1, Math.floor(paper.balance * (maxRiskPct / 100) / cprice));
+    if (contracts > maxContracts){ contracts = maxContracts; riskCapped = true; }
+  }
+  return {contracts:contracts, cprice:cprice, refPrice:refPrice, fStar:fStar, kellyStake:kellyStake, riskCapped:riskCapped};
+}
+function renderKellyPreview(){
+  var el = $('kellyPreview');
+  if (!el) return;
+  var o = currentOdds();
+  if (!o || o.needStrike || o.needVol){ el.textContent = 'Enter a strike to see what Kelly sizing would currently bet.'; return; }
+  var side = o.pAbove >= 0.5 ? 'above' : 'below';
+  var streak = lossStreak(), throttle = streak >= 5 ? 0.25 : (streak >= 3 ? 0.5 : 1);
+  var k = kellySizeNow(side, o, throttle);
+  var stake = Math.round(k.contracts * k.cprice * 100) / 100;
+  el.textContent = 'Kelly would currently bet ' + k.contracts + ' contract' + (k.contracts === 1 ? '' : 's') + ' ' + (side === 'above' ? 'over' : 'under') + ' at ' + Math.round(k.cprice * 100) + '¢, costing ' + money(stake) + ' (' + (stake / paper.balance * 100).toFixed(1) + '% of balance)' +
+    (k.fStar <= 0 ? ' — no edge over the reference price right now, so this floors to the 1-contract minimum' : ', edge ' + (k.fStar * 100).toFixed(1) + '% of bankroll before the ' + ($('kellyFraction').value * 100).toFixed(0) + '% fraction') +
+    (k.riskCapped ? '. Reduced to fit your max-risk-per-trade cap.' : (throttle < 1 ? '. Sized down after ' + streak + ' losses in a row.' : '.'));
+}
+
 function autoCheck(){
   ensureDay();
   if (sessionClosed){ autoHold = null; autoWhy = ''; $('autoStatus').textContent = 'Session closed. Auto-trading is off.'; return; }
@@ -3979,25 +4026,7 @@ function autoCheck(){
   var throttle = streak >= 5 ? 0.25 : (streak >= 3 ? 0.5 : 1);
   var sizeMode = $('autoSize').value, contracts;
   if (sizeMode === 'kelly'){
-    /* Fractional Kelly for a contract that pays $1 on a win, nothing on a loss:
-       f* = (q - p) / (1 - p), where q is the model's own probability for this side and p is the
-       price being edged against. Derived from the standard Kelly formula f* = (b*q - (1-q)) / b
-       with b = (1-p)/p (payout odds on a win).
-       p must be a genuinely independent read of the odds, not contractPrice(q) itself -- that's
-       just q rounded to the nearest cent, so comparing q to its own rounding always reads as
-       ~zero edge and Kelly would floor to 1 contract on every trade, defeating the point of
-       sizing by edge at all. Prefer Kalshi's real ask price when a live quote exists for this
-       strike and window (the same reference the "Edge over Kalshi" checklist row already uses);
-       otherwise fall back to pManual, the slower momentum-free baseline computed elsewhere in
-       this file -- so what actually drives the bet size is momentum's lift over your own sober,
-       non-momentum read of the odds, not a comparison against yourself. */
-    var qModel = side === 'above' ? o.pAbove : o.pBelow, cprice = contractPrice(qModel);
-    var kal = kalshiSnapshot(side, o);
-    var refPrice = (kal && kal.quoted && kal.ask != null) ? clamp(kal.ask + kal.fee, 0.01, 0.99) : contractPrice(side === 'above' ? o.pManual : 1 - o.pManual);
-    var fStar = Math.max(0, (qModel - refPrice) / (1 - refPrice));
-    var kFrac = +$('kellyFraction').value || 0.25;
-    var kellyStake = paper.balance * kFrac * fStar;
-    contracts = Math.max(1, Math.round((kellyStake / cprice) * throttle));
+    contracts = kellySizeNow(side, o, throttle).contracts;
   } else {
     var scale = sizeMode === 'scaled' ? [0, 0.5, 1, 2, 2][tier] : 1;
     contracts = Math.max(1, Math.round(base * throttle * scale));
