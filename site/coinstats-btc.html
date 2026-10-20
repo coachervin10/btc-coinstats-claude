@@ -556,9 +556,8 @@ body.view-simple .adv{ display:none !important; }
         <div class="card-head" id="head-reentry"><h2>Re-entry after a stop loss</h2><span class="card-chevron">▾</span></div>
         <div class="note" style="margin-top:0; padding-top:0;">
           <strong>Re-entry after a stop loss</strong> &mdash; if a bet gets stopped out and the price keeps going the other way, this allows
-          one more trade in the same window on the opposite side, instead of sitting out until the next window. A take-profit close never
-          re-enters, only a stop loss. This also applies to bets you place by hand, not just auto-trading. Needs the stop loss itself
-          switched on above to ever trigger.
+          one more trade in the same window on the opposite side, instead of sitting out until the next window. This also applies to bets
+          you place by hand, not just auto-trading. Needs the stop loss itself switched on above to ever trigger.
         </div>
         <label class="row" style="margin:8px 0;"><input type="checkbox" id="reentryOn"><span>allow a re-entry after a stop loss, on the opposite side</span></label>
         <div class="target-row" style="margin:0 0 6px;">
@@ -576,6 +575,20 @@ body.view-simple .adv{ display:none !important; }
           <select id="reentryMinLeft" aria-label="Minimum minutes left in the window for a re-entry to be allowed"><option value="0">no minimum</option><option value="1">1 minute</option><option value="2" selected>2 minutes</option><option value="3">3 minutes</option><option value="4">4 minutes</option><option value="6">6 minutes</option></select>
         </div>
         <label class="row" style="margin:8px 0;"><input type="checkbox" id="reentryShrink" checked><span>halve the contract count on each successive re-entry (floor of 1)</span></label>
+        <div class="note" style="margin:10px 0 0; padding-top:10px;">
+          <strong>Also re-enter after a take profit</strong> &mdash; off by default, because betting against a trade that just won needs a
+          stronger reason than betting against one that just lost. When on, a take-profit close can trigger the same opposite-side re-entry
+          above, but only once the signal has not just edged back the other way -- it has to clear the usual bar PLUS this extra bonus, on
+          top of the per-re-entry edge above. Everything else (max re-entries, minimum time left, size shrink) is shared with the stop-loss
+          re-entry above.
+        </div>
+        <label class="row" style="margin:8px 0;"><input type="checkbox" id="reentryAfterTp"><span>also allow a re-entry after a take-profit close, if the reversal signal is strong enough</span></label>
+        <div class="target-row" style="margin:0 0 6px;">
+          <label for="reentryTpExtra" class="prob-meta">Extra edge for a take-profit reversal</label>
+          <select id="reentryTpExtra" aria-label="Extra points of edge required, on top of the normal re-entry bar, when the prior close was a take profit rather than a stop loss">
+            <option value="10">+10 points</option><option value="15" selected>+15 points</option><option value="25">+25 points</option><option value="40">+40 points</option>
+          </select>
+        </div>
         <div class="prob-meta" id="reentryNote" style="margin-bottom:4px;"></div>
         <div class="note">
           It bets at most once per expiry, only after the signal has held for 3 seconds, never within 15 seconds of expiry, and only when you
@@ -2440,34 +2453,54 @@ function settleDue(){
   if (changed) savePaper();
   return changed;
 }
-/* one bet per expiry, with one carve-out: after a bet in this window is stopped out (not taken profit), a single
-   re-entry on the OPPOSITE side is allowed when the setting is on, up to the per-window cap. Passing no side keeps
-   the plain one-per-expiry rule (used where the side isn't known yet, e.g. the bet-button enabled state). */
+/* Which closed-bet reasons this window's re-entry can follow: a stop loss always qualifies (when
+   re-entry is on at all); a take-profit close only qualifies when the separate "also re-enter after
+   a take profit" box is checked, since reversing against a winner needs a deliberate opt-in. */
+function reentryQualifyingReasons(){
+  var reasons = ['stop'];
+  if ($('reentryAfterTp').checked) reasons.push('target');
+  return reasons;
+}
+/* one bet per expiry, with one carve-out: after a qualifying close in this window (always a stop loss;
+   also a take profit if that box is checked), a single re-entry on the OPPOSITE side is allowed when
+   the setting is on, up to the per-window cap. Passing no side keeps the plain one-per-expiry rule
+   (used where the side isn't known yet, e.g. the bet-button enabled state). */
 function hasOpenThisExpiry(side){
   var E = expiryMs(Date.now());
   var forExpiry = paper.bets.filter(function(b){ return b.expiry === E && (b.status === 'open' || b.status === 'closed'); });
   if (!forExpiry.length) return false;
   if (forExpiry.some(function(b){ return b.status === 'open'; })) return true;   // never two open bets on the same window
   if (!$('reentryOn').checked || !side) return true;
-  var stops = forExpiry.filter(function(b){ return b.closeReason === 'stop'; });
-  if (!stops.length) return true;                                    // only closed via take-profit, or not closed early at all: no re-entry
-  var lastStop = stops.sort(function(a, b){ return b.closedAt - a.closedAt; })[0];
-  if (lastStop.side === side) return true;                           // re-entry must be the opposite side of the one that stopped out
+  var reasons = reentryQualifyingReasons();
+  var closes = forExpiry.filter(function(b){ return reasons.indexOf(b.closeReason) >= 0; });
+  if (!closes.length) return true;                                   // nothing that qualifies closed early: no re-entry
+  var lastClose = closes.sort(function(a, b){ return b.closedAt - a.closedAt; })[0];
+  if (lastClose.side === side) return true;                          // re-entry must be the opposite side of the one that closed
   var reentryMax = +$('reentryMax').value || 1;
   if (forExpiry.length - 1 >= reentryMax) return true;                // already used up the re-entries allowed this window
   return false;
 }
 /* If placing `side` right now would be a re-entry, returns its 1-based re-entry number (1 = first re-entry after the
-   stop, 2 = second, ...) and the stop it follows. Returns null for an ordinary first bet in the window. Shared by
-   placeBet (for sizing) and autoCheck (for the escalating edge and time-left requirements below). */
+   close, 2 = second, ...) and the close it follows (with a flag for whether that close was a take profit, so the
+   caller can add the extra take-profit-reversal edge bar on top of the normal per-re-entry one). Returns null for
+   an ordinary first bet in the window. Shared by placeBet (for sizing) and autoCheck (for the escalating edge and
+   time-left requirements below). */
 function reentryContext(side, E){
   if (!$('reentryOn').checked || !side) return null;
   var forExpiry = paper.bets.filter(function(b){ return b.expiry === E && (b.status === 'open' || b.status === 'closed'); });
-  var stops = forExpiry.filter(function(b){ return b.closeReason === 'stop'; });
-  if (!stops.length) return null;
-  var lastStop = stops.sort(function(a, b){ return b.closedAt - a.closedAt; })[0];
-  if (lastStop.side === side) return null;
-  return {count:forExpiry.length, stop:lastStop};                     // this would-be bet is re-entry #forExpiry.length
+  var reasons = reentryQualifyingReasons();
+  var closes = forExpiry.filter(function(b){ return reasons.indexOf(b.closeReason) >= 0; });
+  if (!closes.length) return null;
+  var lastClose = closes.sort(function(a, b){ return b.closedAt - a.closedAt; })[0];
+  if (lastClose.side === side) return null;
+  return {count:forExpiry.length, stop:lastClose, afterTp:lastClose.closeReason === 'target'};   // this would-be bet is re-entry #forExpiry.length
+}
+/* The edge bar a re-entry must clear: the usual minimum, plus a per-re-entry escalation, plus (only when the
+   close it follows was a take profit, not a stop loss) a separate, larger one-time bonus -- reversing against a
+   trade that just won needs a stronger signal than reversing against one that just lost. Shared by gateChecklist
+   (which enforces it) and the live reentryNote preview (which only displays it). */
+function reentryEdgeNeeded(rc){
+  return minBaseNow() + (+$('reentryExtra').value || 0) * rc.count + (rc.afterTp ? (+$('reentryTpExtra').value || 0) : 0);
 }
 function placeBet(side, opts){
   opts = opts || {};
@@ -3187,7 +3220,7 @@ function renderSettingsStrip(){
   parts.push('Momentum <b>' + ($('autoMom').checked ? 'must agree' : 'optional') + '</b>');
   parts.push('Trend gate <b>' + ($('trendOn').checked ? ($('trendMode').value === 'block' ? 'block' : 'extra edge') : 'off') + '</b>');
   parts.push('Streak break <b>' + ($('sideBreakOn').checked ? $('sideBreakN').value + 'x' : 'off') + '</b>');
-  parts.push('Re-entry <b>' + ($('reentryOn').checked ? '\u00d7' + $('reentryMax').value : 'off') + '</b>');
+  parts.push('Re-entry <b>' + ($('reentryOn').checked ? '\u00d7' + $('reentryMax').value + ($('reentryAfterTp').checked ? '+TP' : '') : 'off') + '</b>');
   el.innerHTML = parts.join(' \u00b7 ');
 }
 
@@ -3283,8 +3316,8 @@ function tick(){
   (function(){
     var rc = reentryContext($('strike').value > 0 ? (nowPrice() != null && nowPrice() > parseFloat($('strike').value) ? 'above' : 'below') : null, expiryMs(Date.now()));
     $('reentryNote').textContent = rc
-      ? 'This would be re-entry #' + rc.count + ' this window (following a stop on ' + (rc.stop.side === 'above' ? 'over' : 'under') + '). Needs ' + (minBaseNow() + (+$('reentryExtra').value || 0) * rc.count).toFixed(0) + ' points of edge before momentum' + (+$('reentryMinLeft').value ? ' and ' + $('reentryMinLeft').value + '+ minutes left' : '') + '.'
-      : 'No stop-loss re-entry pending in the current window.';
+      ? 'This would be re-entry #' + rc.count + ' this window (following a ' + (rc.afterTp ? 'take profit' : 'stop') + ' on ' + (rc.stop.side === 'above' ? 'over' : 'under') + '). Needs ' + reentryEdgeNeeded(rc).toFixed(0) + ' points of edge before momentum' + (+$('reentryMinLeft').value ? ' and ' + $('reentryMinLeft').value + '+ minutes left' : '') + '.'
+      : 'No re-entry pending in the current window.';
   })();
   $('sideBreakNote').textContent = sideBreakNoteText();
   renderReadiness();
@@ -3883,9 +3916,9 @@ function gateChecklist(side, o, left){
 
   var reCtx = reentryContext(side, o.E);
   if (reCtx){
-    var reNeed = minBase + (+$('reentryExtra').value || 0) * reCtx.count;
+    var reNeed = reentryEdgeNeeded(reCtx);
     out.push({label:'Re-entry #' + reCtx.count + ' edge', pass:baseEdge >= reNeed - 0.0001, value:baseEdge.toFixed(1) + ' pts (need ' + reNeed.toFixed(0) + ')',
-      message:'Re-entry #' + reCtx.count + ' needs ' + reNeed.toFixed(0) + ' points of edge before momentum (has ' + baseEdge.toFixed(1) + ').'});
+      message:'Re-entry #' + reCtx.count + (reCtx.afterTp ? ' (reversing after a take profit)' : '') + ' needs ' + reNeed.toFixed(0) + ' points of edge before momentum (has ' + baseEdge.toFixed(1) + ').'});
     var reMinLeft = +$('reentryMinLeft').value || 0;
     if (reMinLeft) out.push({label:'Re-entry time left', pass:left >= reMinLeft * 60000, value:(left / 60000).toFixed(1) + 'm (need ' + reMinLeft + 'm)',
       message:'Re-entry #' + reCtx.count + ' needs at least ' + reMinLeft + ' minute' + (reMinLeft > 1 ? 's' : '') + ' left (has ' + (left / 60000).toFixed(1) + ').'});
@@ -4467,11 +4500,14 @@ $('trendWin').value = get('cs_trend_win_v1', '3'); $('trendMinSd').value = get('
 $('sideBreakN').value = get('cs_sidebreak_n_v1', '3'); $('sideBreakWin').value = get('cs_sidebreak_win_v1', '60');
 $('reentryOn').checked = get('cs_reentry_on_v1', '0') === '1'; $('reentryMax').value = get('cs_reentry_max_v1', '1');
 $('reentryExtra').value = get('cs_reentry_extra_v1', '8'); $('reentryMinLeft').value = get('cs_reentry_min_left_v1', '2'); $('reentryShrink').checked = get('cs_reentry_shrink_v1', '1') !== '0';
+$('reentryAfterTp').checked = get('cs_reentry_after_tp_v1', '0') === '1'; $('reentryTpExtra').value = get('cs_reentry_tp_extra_v1', '15');
 $('reentryOn').addEventListener('change', function(){ put('cs_reentry_on_v1', $('reentryOn').checked ? '1' : '0'); tick(); });
 $('reentryMax').addEventListener('change', function(){ put('cs_reentry_max_v1', $('reentryMax').value); tick(); });
 $('reentryExtra').addEventListener('change', function(){ put('cs_reentry_extra_v1', $('reentryExtra').value); tick(); });
 $('reentryMinLeft').addEventListener('change', function(){ put('cs_reentry_min_left_v1', $('reentryMinLeft').value); tick(); });
 $('reentryShrink').addEventListener('change', function(){ put('cs_reentry_shrink_v1', $('reentryShrink').checked ? '1' : '0'); tick(); });
+$('reentryAfterTp').addEventListener('change', function(){ put('cs_reentry_after_tp_v1', $('reentryAfterTp').checked ? '1' : '0'); tick(); });
+$('reentryTpExtra').addEventListener('change', function(){ put('cs_reentry_tp_extra_v1', $('reentryTpExtra').value); tick(); });
 $('scaleInOn').checked = get('cs_scalein_on_v1', '0') === '1';
 $('scaleInMinGain').value = get('cs_scalein_mingain_v1', '10');
 $('scaleInSizePct').value = get('cs_scalein_sizepct_v1', '50');
