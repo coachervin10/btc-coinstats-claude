@@ -1,0 +1,12 @@
+name = "coinstats-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# Set with: wrangler secret put COINSTATS_API_KEY --config workers/coinstats-proxy/wrangler.toml
+# (the GitHub Actions workflow in .github/workflows/deploy.yml does this for you from a repo secret)
+
+[vars]
+# Seconds to cache each upstream response at Cloudflare's edge. CoinStats bills per request,
+# so this is the main lever on your credit usage; raise it if you're burning credits too fast.
+TICKER_CACHE_S = "3"
+CHART_CACHE_S = "60"

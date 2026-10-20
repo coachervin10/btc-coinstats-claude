@@ -1,0 +1,12 @@
+name = "newsflow-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# Set with: wrangler secret put ALPHA_VANTAGE_API_KEY --config workers/newsflow-proxy/wrangler.toml
+# Alpha Vantage's free tier is rate-limited (as low as 25 requests/day on some keys), so the
+# cache below matters a lot here -- NEWS_CACHE_S should stay at or above how often the page
+# itself polls (NEWS_EVERY_MS in the page is 180000 = 3 minutes).
+
+[vars]
+NEWS_CACHE_S = "180"
+FX_CACHE_S = "60"

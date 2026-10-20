@@ -1,0 +1,16 @@
+name = "paper-store"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# D1 database "btc-paper-store" was created for this project (already provisioned in your
+# Cloudflare account at the UUID below). Run the schema once before first deploy:
+#   wrangler d1 execute btc-paper-store --remote --file=workers/paper-store/schema.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "btc-paper-store"
+database_id = "4f7c7399-928b-4cc5-a148-2e9327cc19f1"
+
+[vars]
+# Max size, in characters, of the JSON blob a single token may store (one paper-trading
+# account's full state: balance + bet history). ~1MB is generous for this.
+MAX_STATE_CHARS = "1000000"

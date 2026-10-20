@@ -1,0 +1,16 @@
+name = "kalshi-btc15"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# This worker is ALREADY deployed and in production use as a read-only MCP server for Claude's
+# "MCP_PATH_TOKEN" connector (the /mcp/<MCP_PATH_TOKEN> route below). This file brings its
+# source into version control and adds a second, plain-REST surface (/api/market, /api/orderbook)
+# for the standalone site in ../../site/coinstats-btc.html, which doesn't speak MCP/JSON-RPC.
+# The original MCP route is untouched -- deploying this file should not change Claude's existing
+# integration at all, only add the new REST routes alongside it.
+#
+# Set with: wrangler secret put MCP_PATH_TOKEN --config workers/kalshi-btc15/wrangler.toml
+# (only needed if you want the MCP path itself behind a secret path segment, as it is today)
+
+[vars]
+CACHE_MS = "1000"

@@ -1,0 +1,14 @@
+name = "cryptocom-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# Crypto.com's public market-data API needs no API key, so this worker has no secrets to set.
+# It exists only to (a) add CORS headers a browser needs and (b) reshape the exchange's raw
+# field names (o/h/l/c/v/t, p/q/s, etc.) into the friendlier names the page's own parsing code
+# already expects (open/high/low/close/volume/timestamp, price/qty/side), confirmed against the
+# live API while building this.
+
+[vars]
+BOOK_TRADES_CACHE_S = "2"
+CANDLE_CACHE_S = "15"
+VALUATION_CACHE_S = "3"
