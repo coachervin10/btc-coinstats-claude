@@ -144,6 +144,32 @@ authenticated one). If it's gone or changed shape, this Worker just excludes it 
 like any other exchange outage — the page will show it with an error in the per-exchange table
 rather than breaking anything.
 
+## Live automation, Phase 1: shadow mode (no real trading yet)
+
+Added to `site/coinstats-btc.html` only (no new Worker) — a rehearsal for a real money-connected
+trading bot, with no real account or API key involved yet:
+
+- Every auto-trade placed on the existing paper Kalshi ledger is mirrored as a same-dollar Coinbase
+  position, using the live Coinbase price this page already polls through `refprice-proxy` — long
+  when betting over, a synthetic short-equivalent when betting under (a plain spot buy can't
+  literally short, so this approximates what a futures/margin short would have done).
+- The mirror opens at the live Coinbase price when the bet is placed and closes at the Coinbase
+  price read when the window settles (a few seconds after the real close, not the exact tick).
+- A daily loss cap, in dollars, combines today's Kalshi-shadow (the paper ledger's auto-trade
+  results) and Coinbase-shadow results. Once crossed, both stop opening new shadow trades until
+  manually re-armed — the same behavior a real bot would need, tested here with zero financial risk.
+
+**Phase 2 (real order placement) is a separate, much bigger build, not yet started.** It needs:
+- A Kalshi account with a generated API key (RSA key pair) under Account → API Keys, and separately
+  a Coinbase Advanced Trade API key scoped with *trade* (not just view) permission.
+- A hard server-side daily loss cap (not just client-side) that disarms live order submission the
+  moment it's crossed, requiring a manual re-arm — mirroring what shadow mode already rehearses.
+- Secure handling of real trading keys as Worker secrets, never exposed to the browser.
+
+Claude will not place a real trade or transfer real funds on your behalf under any circumstance —
+that's a fixed rule, not a setting. Phase 2, if and when you want it, is code you'd run yourself
+under your own credentials and your own risk.
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run

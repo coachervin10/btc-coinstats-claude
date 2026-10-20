@@ -238,6 +238,34 @@ body.view-simple .adv{ display:none !important; }
       </div>
 
       <div class="card">
+        <h2>Live automation (shadow mode)</h2>
+        <div class="prob-meta" id="shadowStatus" style="margin-bottom:8px;">&mdash;</div>
+        <div class="target-row" style="margin:0 0 10px;">
+          <label for="shadowCapUsd" class="prob-meta">Daily loss cap</label>
+          <input type="number" id="shadowCapUsd" step="1" min="0" placeholder="e.g. 50" style="width:90px;" aria-label="Daily loss cap in dollars for shadow automation">
+          <span class="prob-meta">$ (blank = no cap)</span>
+          <button type="button" class="chip" id="shadowRearmBtn" style="display:none;">Re-arm</button>
+        </div>
+        <div class="prob-meta" id="shadowSummary" style="margin-bottom:10px;">No shadow trades yet.</div>
+        <table>
+          <thead><tr><th>Opened</th><th>Side</th><th>Entry</th><th>Close</th><th class="val">P&amp;L</th></tr></thead>
+          <tbody id="shadowCbBody"><tr><td colspan="5" style="color:var(--dim)">No Coinbase shadow trades yet.</td></tr></tbody>
+        </table>
+        <div class="note" style="margin-top:10px;">
+          Phase 1 of automated live trading: every auto-trade this page places on its own paper Kalshi ledger is
+          mirrored here as a same-dollar Coinbase position &mdash; long when betting over, a synthetic
+          short-equivalent when betting under (a plain spot buy cannot literally short, so this approximates what a
+          futures or margin short would have done). Opened at the live Coinbase price when the bet is placed, closed
+          at the Coinbase price read when the window settles &mdash; a few seconds after the real close, not the
+          exact tick. Nothing here touches a real account or places a real order; it is a rehearsal so you can build
+          a track record and tune a loss cap before any real Kalshi or Coinbase API key is ever involved. The daily
+          cap combines today's Kalshi-shadow (the paper ledger's auto-trade results) and Coinbase-shadow results;
+          once it is crossed, both stop opening new shadow trades until you re-arm them by hand &mdash; the same
+          behavior a real money-connected bot would need.
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Trade Readiness</h2>
         <div class="prob-meta" id="readyVerdict" style="margin-bottom:10px;">Enter a strike to see the checklist.</div>
         <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="readyOnlyFailing"><span>only show what's currently blocking</span></label>
@@ -2301,6 +2329,82 @@ function ensureDay(){
   var k = new Date().toDateString();
   if (paper.dayKey !== k || typeof paper.dayStart !== 'number'){ paper.dayKey = k; paper.dayStart = paper.balance; savePaper(); }
 }
+
+/* ---------- live automation, shadow mode: a rehearsal for a real money-connected bot ----------
+   Every auto-trade placed on the paper Kalshi ledger is mirrored here as a same-dollar Coinbase
+   position (no real account, no real order -- it reads the live Coinbase price this page already
+   polls through refprice-proxy and nothing else). The point is to build a track record and tune a
+   daily loss cap before any real Kalshi or Coinbase API key is ever involved: once the combined
+   Kalshi-shadow + Coinbase-shadow result for the day crosses the cap, both stop opening new shadow
+   trades until re-armed by hand -- the same behavior a real bot would need. */
+var shadow = {capUsd:null, armed:true, dayKey:null, cb:[]};
+try { var savedShadow = JSON.parse(get('cs_shadow_v1', 'null')); if (savedShadow && typeof savedShadow === 'object') shadow = Object.assign(shadow, savedShadow); } catch (e) {}
+function saveShadow(){ put('cs_shadow_v1', JSON.stringify(shadow)); }
+function coinbaseNow(){ var e = refp.data && refp.data.exchanges && refp.data.exchanges.coinbase; return (e && isFinite(e.price)) ? e.price : null; }
+function isToday(ms){ return new Date(ms).toDateString() === new Date().toDateString(); }
+function shadowKalshiPnlToday(){
+  return paper.bets.filter(function(b){ return b.auto && b.status === 'settled' && isToday(b.placedAt); }).reduce(function(a, b){ return a + (b.pnl || 0); }, 0);
+}
+function shadowCbPnlToday(){
+  return shadow.cb.filter(function(e){ return e.closed && isToday(e.openedAt); }).reduce(function(a, e){ return a + (e.pnl || 0); }, 0);
+}
+function shadowEnsureDay(){
+  var k = new Date().toDateString();
+  if (shadow.dayKey !== k){ shadow.dayKey = k; shadow.armed = true; saveShadow(); }
+}
+function shadowCheckCap(){
+  shadowEnsureDay();
+  if (!shadow.armed) return;
+  var cap = +shadow.capUsd || 0;
+  if (cap <= 0) return;
+  if (shadowKalshiPnlToday() + shadowCbPnlToday() <= -cap){ shadow.armed = false; saveShadow(); }
+}
+/* Mirrors an auto-placed Kalshi bet as a Coinbase shadow position the instant it opens. 'above' (betting the
+   window closes over strike) mirrors a long; 'below' mirrors a synthetic short-equivalent, since a plain spot
+   buy cannot literally short -- this approximates what a futures/margin short would have done. */
+function shadowOnOpen(bet){
+  if (!bet.auto || !shadow.armed) return;
+  var p = coinbaseNow();
+  if (p == null) return;
+  shadow.cb.push({id:bet.id, betId:bet.id, side:bet.side, direction:bet.side === 'above' ? 'long' : 'short_equiv', entryPrice:p, notionalUsd:bet.stake, openedAt:Date.now(), closed:false});
+  saveShadow();
+}
+function shadowOnSettle(bet){
+  if (!bet.auto) return;
+  var e = shadow.cb.filter(function(x){ return x.betId === bet.id && !x.closed; })[0];
+  if (!e) return;
+  var p = coinbaseNow();
+  if (p == null) return;                                       // leaves it open; closes next time a Coinbase price is available
+  var pct = (p - e.entryPrice) / e.entryPrice;
+  e.pnl = Math.round((e.direction === 'long' ? pct : -pct) * e.notionalUsd * 100) / 100;
+  e.closePrice = p; e.closedAt = Date.now(); e.closed = true;
+  saveShadow();
+}
+function shadowRearm(){ shadow.armed = true; saveShadow(); tick(); }
+function renderShadow(){
+  var status = $('shadowStatus'), rearmBtn = $('shadowRearmBtn'), summary = $('shadowSummary'), body = $('shadowCbBody');
+  if (!status) return;
+  shadowEnsureDay();
+  var kp = shadowKalshiPnlToday(), cp = shadowCbPnlToday(), total = kp + cp;
+  if (!shadow.armed){
+    status.textContent = '⏸ Disarmed: today’s shadow loss (' + money(total) + ') crossed your ' + money(+shadow.capUsd) + ' cap. New shadow trades are paused.';
+    rearmBtn.style.display = '';
+  } else {
+    status.textContent = '● Armed' + (shadow.capUsd ? ' · cap ' + money(+shadow.capUsd) + '/day' : ' · no daily cap set') + '.';
+    rearmBtn.style.display = 'none';
+  }
+  var closedCb = shadow.cb.filter(function(e){ return e.closed; });
+  summary.textContent = 'Today: Kalshi-shadow ' + money(kp) + ', Coinbase-shadow ' + money(cp) + ', combined ' + money(total) + ' (' + closedCb.length + ' Coinbase shadow trade' + (closedCb.length === 1 ? '' : 's') + ' closed all time).';
+  body.innerHTML = '';
+  var recent = shadow.cb.slice(-10).reverse();
+  if (!recent.length){ body.innerHTML = '<tr><td colspan="5" style="color:var(--dim)">No Coinbase shadow trades yet.</td></tr>'; return; }
+  recent.forEach(function(e){
+    var tr = document.createElement('tr');
+    var cells = [fmtTime(e.openedAt), (e.direction === 'long' ? 'long' : 'short-equiv'), fmt(e.entryPrice), e.closed ? fmt(e.closePrice) : 'open', e.closed ? money(e.pnl) : '—'];
+    cells.forEach(function(txt, i){ var td = document.createElement('td'); td.textContent = txt; if (i === 4) td.className = 'val'; tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+}
 /* when the strike box was last set by you (typing, the current-price button, or a BRTI entered at a close) */
 var strikeSetAt = +get(K.strikeAt, '0') || 0;
 function markStrikeSet(){ strikeSetAt = Date.now(); put(K.strikeAt, String(strikeSetAt)); }
@@ -2329,7 +2433,7 @@ function settleDue(){
     }
     if (b.status !== 'open' || now < b.expiry + 6000) return;
     var nbs = nearestSample(b.expiry);
-    if (nbs && nbs.d <= 15000){ b.csPrice = nbs.c; b.csAdj = adj; settle(b, nbs.c, 'coinstats'); changed = true; }
+    if (nbs && nbs.d <= 15000){ b.csPrice = nbs.c; b.csAdj = adj; settle(b, nbs.c, 'coinstats'); changed = true; try { shadowOnSettle(b); } catch (e) { /* rehearsal feature only -- never let it block real settlement */ } }
     else if (now > b.expiry + 30000){ b.status = 'needs_brti'; changed = true; }
   });
   if (changed) savePaper();
@@ -2368,6 +2472,7 @@ function placeBet(side, opts){
   opts = opts || {};
   var m = opts.auto ? $('autoStatus') : $('betMsg'), o = currentOdds();
   if (sessionClosed){ m.textContent = 'The session is closed. Press Start session first.'; return false; }
+  if (opts.auto){ shadowEnsureDay(); if (!shadow.armed){ m.textContent = 'Shadow automation is disarmed (daily loss cap hit). Re-arm it in the Live Automation card to resume.'; return false; } }
   if (!o || o.needStrike || o.needVol){ m.textContent = !o ? 'Waiting for a price from CoinStats.' : (o.needStrike ? 'Enter a strike price first.' : 'Waiting for the volatility estimate from CoinStats.'); return false; }
   var lim = Math.max(30000, (currentInterval() || 0) + 10000);
   if (Date.now() - latest().t > lim){ m.textContent = 'The last fetch is more than ' + Math.round(lim / 1000) + ' seconds old. Turn live fetching on, and if it is waiting for the fast window, raise the slower rate or wait.'; return false; }
@@ -2391,10 +2496,12 @@ function placeBet(side, opts){
   var isReentry = !!reCtxNow;
   paper.balance -= stake;
   var leftMs = o.E - Date.now();
-  paper.bets.push({id:Date.now(), placedAt:Date.now(), leftMs:leftMs, periodMin:(+$('period').value || 15), side:side, strike:o.K, expiry:o.E, stake:stake, contracts:contracts, price:cprice, prob:prob, pBase:side === 'above' ? o.pBase : 1 - o.pBase, lean:o.lean, sdUsd:o.sdUsd, volMult:o.mult, mu:o.mu, momMode:o.momMode, entryPrice:o.S, entryPerSec:o.perSec, volCands:o.volCands, kalshi:kalshiSnapshot(side, o), origContracts:contracts, status:'open', auto:!!opts.auto, tier:opts.tier || null, reentry:isReentry,
+  var newBet = {id:Date.now(), placedAt:Date.now(), leftMs:leftMs, periodMin:(+$('period').value || 15), side:side, strike:o.K, expiry:o.E, stake:stake, contracts:contracts, price:cprice, prob:prob, pBase:side === 'above' ? o.pBase : 1 - o.pBase, lean:o.lean, sdUsd:o.sdUsd, volMult:o.mult, mu:o.mu, momMode:o.momMode, entryPrice:o.S, entryPerSec:o.perSec, volCands:o.volCands, kalshi:kalshiSnapshot(side, o), origContracts:contracts, status:'open', auto:!!opts.auto, tier:opts.tier || null, reentry:isReentry,
     baseEdge:Math.round(((side === 'above' ? o.pManual : 1 - o.pManual) - 0.5) * 1000) / 10,
-    fx:(o.mom && o.mom.items) ? o.mom.items.map(function(x){ return [x.name, Math.round(x.lean * 100) / 100]; }) : null});
+    fx:(o.mom && o.mom.items) ? o.mom.items.map(function(x){ return [x.name, Math.round(x.lean * 100) / 100]; }) : null};
+  paper.bets.push(newBet);
   savePaper();
+  try { shadowOnOpen(newBet); } catch (e) { /* shadow automation is a rehearsal feature only -- never let it block a real paper bet */ }
   m.textContent = 'Placed: ' + contracts + ' contract' + (contracts > 1 ? 's' : '') + ' ' + (side === 'above' ? 'over' : 'under') + ' ' + fmt(o.K, 0) + ' at ' + Math.round(cprice * 100) + '\u00a2 (model odds ' + (prob * 100).toFixed(1) + '%), cost ' + money(stake) + ' (' + (stake / (paper.balance + stake) * 100).toFixed(1) + '% of balance), gains ' + money(contracts * (1 - cprice)) + ' if right. Expires ' + fmtTime(o.E) + ', with ' + fmtLeft(leftMs) + ' left.' + (riskCapped ? ' Reduced to fit your ' + maxRiskPct + '% max-risk-per-trade cap.' : '');
   lastPlaceMsg = m.textContent;
   renderLedger(); tick();
@@ -3166,6 +3273,7 @@ function tick(){
   drawFlowChart();
   renderOdds();
   if (settleDue()) renderLedger();
+  try { shadowCheckCap(); renderShadow(); } catch (e) { /* rehearsal feature only -- never let it break the main tick */ }
   recordWindow();
   autoCloseCheck();
   $('trendNote').textContent = trendNoteText();
@@ -4315,6 +4423,9 @@ $('autoOn').addEventListener('change', function(){
   if ($('autoOn').checked){ ensureDay(); if (paper.capHit){ paper.dayStart = paper.balance; paper.capHit = false; savePaper(); } autoLast = ''; }
   autoHold = null; autoCheck(); tick();
 });
+$('shadowCapUsd').value = shadow.capUsd != null ? shadow.capUsd : '';
+$('shadowCapUsd').addEventListener('change', function(){ var v = $('shadowCapUsd').value; shadow.capUsd = v === '' ? null : Math.max(0, +v || 0); saveShadow(); renderShadow(); });
+$('shadowRearmBtn').addEventListener('click', function(){ shadowRearm(); });
 [['autoMinPts', 'cs_auto_min_pts_v2'], ['autoMomMin', 'cs_auto_mom_min_v1'], ['autoVotes', 'cs_auto_votes_v1'], ['autoMinC', 'cs_auto_min_c_v1'], ['autoMinBase', 'cs_auto_min_base_v1'], ['autoMaxC', 'cs_auto_max_c_v1'], ['autoWhen', K.autoWhen], ['autoSize', K.autoSize],
  ['trendWin', 'cs_trend_win_v1'], ['trendMinSd', 'cs_trend_minsd_v1'], ['trendMode', 'cs_trend_mode_v1'], ['trendExtra', 'cs_trend_extra_v1'],
  ['sideBreakN', 'cs_sidebreak_n_v1'], ['sideBreakWin', 'cs_sidebreak_win_v1'],
