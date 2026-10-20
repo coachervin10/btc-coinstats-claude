@@ -1,0 +1,14 @@
+name = "refprice-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# None of these six exchanges' public ticker endpoints need an API key, so this worker has no
+# secrets to set. It fetches Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit in parallel,
+# reshapes each into a common {price, volume, bid, ask, high24h, low24h, timestamp} shape, and
+# returns a volume-weighted average price across whichever ones answered. See src/worker.js for
+# the full rationale (this approximates the BRTI index Kalshi settles its BTC contract against).
+
+[vars]
+# Seconds to cache the combined result at Cloudflare's edge. Six upstream calls per request is
+# comparatively heavy, so this is the main lever on how often those six exchanges actually get hit.
+VWAP_CACHE_S = "3"

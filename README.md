@@ -4,8 +4,8 @@ This is a standalone rebuild of a BTC/USD paper-trading tracker that originally 
 Claude artifact (reading CoinStats, Crypto.com, Alpha Vantage and Kalshi through Claude's own
 MCP connectors). It now runs as:
 
-- five small **Cloudflare Workers** (`workers/*`) that each proxy one upstream data source,
-  reshaping responses so the page's existing parsing code didn't need to change
+- six small **Cloudflare Workers** (`workers/*`) that each proxy one or more upstream data
+  sources, reshaping responses so the page's existing parsing code didn't need to change
 - one **static page** (`site/coinstats-btc.html`) that calls those Workers directly with
   `fetch()` — no Claude account, connector, or artifact needed to use it
 - a **GitHub Actions workflow** (`.github/workflows/deploy.yml`) that deploys all of the above
@@ -55,8 +55,8 @@ of the script.
 Once the secrets and variable above are set, push (or re-run the workflow from the **Actions**
 tab — **Deploy** → **Run workflow**). It will:
 
-1. Deploy `coinstats-proxy`, `cryptocom-proxy`, `newsflow-proxy`, `kalshi-btc15` and
-   `paper-store` as five separate Workers.
+1. Deploy `coinstats-proxy`, `cryptocom-proxy`, `newsflow-proxy`, `kalshi-btc15`,
+   `paper-store` and `refprice-proxy` as six separate Workers.
 2. Apply `workers/paper-store/schema.sql` to the `btc-paper-store` D1 database (already created
    in your Cloudflare account; this step is safe to run repeatedly — it's `CREATE TABLE IF NOT
    EXISTS`).
@@ -89,6 +89,36 @@ unavailable rather than erroring loudly:
 
 Both are optional — the core page (price tracking, the model, paper trading, the Kalshi strike
 comparison) works fully without them.
+
+## Cross-exchange reference price (`refprice-proxy`)
+
+`workers/refprice-proxy` fetches Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit's public
+ticker endpoints in parallel and combines them into a volume-weighted average price — a
+"Cross-exchange reference price" card on the page. None of these six need an API key or account;
+they're all open, unauthenticated endpoints.
+
+**Why these six:** they're most of the real constituent exchanges behind CF Benchmarks' BRTI, the
+index Kalshi's 15-minute BTC contract actually settles against. The one real constituent left out
+is **LMAX Digital** — an institutional-only venue with no open public API, so there's nothing for
+this Worker to call without you having an LMAX account of your own. That means this is an
+**approximation** of BRTI, not a reproduction of it — useful for comparison and as a volume
+signal, not a guarantee that it matches Kalshi's settlement price exactly.
+
+**What it feeds into:** the page's own tracked price and model (CoinStats-based, used for every
+indicator and the strike/edge math) are unchanged — swapping that out would mean re-validating
+every indicator against a different polling cadence. Instead, the reference price is shown
+side-by-side for comparison, and its volume trend (is combined 24h volume across these exchanges
+rising or flat over the last minute?) feeds one new, optional "Volume confirmation" row in Trade
+Readiness: a signal backed by a real rise in cross-exchange volume is on firmer ground than the
+same signal on flat or falling volume. It's off (informational-only) by default, like the other
+optional gates.
+
+**A caveat worth knowing:** `itBit`'s endpoint here uses its older public v1 API shape, which
+wasn't independently re-verified as still live in its documented form at the time this was built
+(Paxos, itBit's parent, has since shifted its newer API toward an institutional, mostly
+authenticated one). If it's gone or changed shape, this Worker just excludes it from the blend
+like any other exchange outage — the page will show it with an error in the per-exchange table
+rather than breaking anything.
 
 ## How cross-device sync works
 
@@ -130,8 +160,9 @@ workers/
   newsflow-proxy/      Alpha Vantage news sentiment + FX rate (needs ALPHA_VANTAGE_API_KEY)
   kalshi-btc15/        Kalshi 15-min BTC market (existing MCP route + new REST routes)
   paper-store/         D1-backed cross-device paper-trading persistence
+  refprice-proxy/      Coinbase/Kraken/Bitstamp/Gemini/Bullish/itBit volume-weighted reference price (no key needed)
 site/
   coinstats-btc.html   the standalone page; publish target for Cloudflare Pages
 .github/workflows/
-  deploy.yml           deploys all five Workers + the page on push to main
+  deploy.yml           deploys all six Workers + the page on push to main
 ```

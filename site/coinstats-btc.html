@@ -105,6 +105,7 @@ body.view-simple .adv{ display:none !important; }
     <div class="price-box">
       <div class="price-label"><span class="live-dot" id="liveDot"></span>Live BTC/USD</div>
       <div class="price-line" id="price">—</div>
+      <div class="prob-meta" id="refpLine" style="margin-top:4px;"></div>
     </div>
   </header>
   <div id="sessionRow" style="display:flex; justify-content:flex-end; align-items:center; gap:10px; margin:-4px 0 8px; flex-wrap:wrap;">
@@ -219,6 +220,24 @@ body.view-simple .adv{ display:none !important; }
       </div>
 
       <div class="card">
+        <h2>Cross-exchange reference price</h2>
+        <div class="prob-meta" id="refpSummary" style="margin-bottom:8px;">Waiting for the first read&hellip;</div>
+        <table>
+          <thead><tr><th>Exchange</th><th>Price</th><th>24h volume (BTC)</th></tr></thead>
+          <tbody id="refpBody"></tbody>
+        </table>
+        <div class="note" style="margin-top:10px;">
+          A volume-weighted average price across the public exchanges that make up most of CF Benchmarks&rsquo;
+          BRTI &mdash; the index Kalshi&rsquo;s 15-minute BTC contract actually settles against (Coinbase, Kraken,
+          Bitstamp, Gemini, Bullish, itBit). LMAX Digital is a real BRTI constituent too but has no open public
+          API, so it is not included; this is an approximation of BRTI, not a reproduction of it. One slow or
+          unreachable exchange is simply left out of the average rather than failing the whole read &mdash; see
+          how many sources answered above. This feeds the &ldquo;Volume confirmation&rdquo; check in Trade
+          Readiness below; the page&rsquo;s own tracked price and model are unchanged.
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Trade Readiness</h2>
         <div class="prob-meta" id="readyVerdict" style="margin-bottom:10px;">Enter a strike to see the checklist.</div>
         <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="readyOnlyFailing"><span>only show what's currently blocking</span></label>
@@ -231,7 +250,7 @@ body.view-simple .adv{ display:none !important; }
           shows the whole picture before a trade fires, whether or not auto-trading is on.
         </div>
         <div class="note" style="margin-top:10px; padding-top:10px;">
-          Five optional checks below are always shown, either way -- checking a box here is what turns that
+          Six optional checks below are always shown, either way -- checking a box here is what turns that
           specific one from informational into something that can actually block a trade. All off by default.
         </div>
         <table>
@@ -243,6 +262,7 @@ body.view-simple .adv{ display:none !important; }
             <tr><td><input type="checkbox" id="srBlockOn" aria-label="Block when the strike is near the 24h high/low or a round level"></td><td>Strike near a 24h high/low or round level</td><td class="prob-meta">within 0.15%</td></tr>
             <tr><td><input type="checkbox" id="intraWinBlockOn" aria-label="Block below a minimum share of this window's own one-minute candles favoring the trade's side"></td><td>Intra-window consistency</td><td><select id="intraWinMin" aria-label="Minimum percentage of one-minute candles since this window opened that must favor the trade's side"><option value="50">50%</option><option value="60" selected>60%</option><option value="70">70%</option><option value="80">80%</option></select></td></tr>
             <tr><td><input type="checkbox" id="pocBlockOn" aria-label="Block when the strike is too close to the volume point of control"></td><td>Strike near the volume point of control</td><td><select id="pocProxPct" aria-label="Maximum percent distance from the point of control that still counts as near it"><option value="0.05">0.05%</option><option value="0.1" selected>0.1%</option><option value="0.15">0.15%</option><option value="0.25">0.25%</option></select></td></tr>
+            <tr><td><input type="checkbox" id="volConfirmOn" aria-label="Block when the signal's direction is not backed by rising cross-exchange volume"></td><td>Volume confirmation (cross-exchange)</td><td><select id="volConfirmPct" aria-label="Minimum rise in total cross-exchange volume, over the last minute, that counts as confirmation"><option value="2">2%</option><option value="5" selected>5%</option><option value="10">10%</option><option value="20">20%</option></select>&nbsp;rise/min</td></tr>
           </tbody>
         </table>
       </div>
@@ -860,6 +880,7 @@ var API_BASE = {
   alphavantage: 'https://newsflow-proxy.__CF_SUBDOMAIN__.workers.dev',
   kalshi: 'https://kalshi-btc15.__CF_SUBDOMAIN__.workers.dev',
   paperstore: 'https://paper-store.__CF_SUBDOMAIN__.workers.dev',
+  refprice: 'https://refprice-proxy.__CF_SUBDOMAIN__.workers.dev',
 };
 var serverName = 'coinstats';
 /**
@@ -892,6 +913,10 @@ async function callApi(server, tool, input){
     else if (tool === 'get_btc15_orderbook') path = '/api/orderbook';
     else throw {code:'tool_error', message:'unknown tool: kalshi-btc15 has no REST route for ' + tool + ' yet (see README.md)'};
     Object.keys(input).forEach(function(k){ qs.set(k, input[k]); });
+  } else if (server === 'refprice'){
+    base = API_BASE.refprice;
+    if (tool === 'get-vwap') path = '/api/vwap';
+    else throw {code:'bad_shape', message:'refprice-proxy has no route for ' + tool};
   } else {
     throw {code:'bad_shape', message:'no proxy configured for server ' + server};
   }
@@ -1552,6 +1577,90 @@ function renderKalshi(){
     a.textContent = r[0]; b.textContent = r[1]; tr.appendChild(a); tr.appendChild(b); body.appendChild(tr);
   });
   if (m.warnings && m.warnings.length) status.textContent += (status.textContent ? ' ' : '') + 'Connector warnings: ' + m.warnings.join(' ');
+}
+
+/* ---------- cross-exchange reference price (VWAP) ----------
+   A volume-weighted average across the public exchanges behind most of CF Benchmarks' BRTI (the
+   index Kalshi's 15-minute BTC contract settles against): Coinbase, Kraken, Bitstamp, Gemini,
+   Bullish, itBit (LMAX Digital, also a BRTI constituent, is institutional-only and has no open
+   API, so it's left out -- this approximates BRTI, it does not reproduce it). Read through the
+   refprice-proxy Worker, which does the six-exchange fetch and the VWAP math server-side; this
+   page just displays it and derives a short-term volume trend from repeated reads.
+
+   This is additive, not a replacement for the page's own tracked price (o.S, from CoinStats):
+   swapping the model's core price input for a price on a different polling cadence would mean
+   re-validating every indicator and momentum calculation against it. Instead this reference price
+   is shown for comparison, and its volume trend feeds one new, optional gate ("Volume
+   confirmation") in Trade Readiness below -- the idea being that a signal lining up with rising
+   traded volume across these exchanges is on firmer ground than the same signal on flat or
+   falling volume, not that volume alone predicts direction. */
+var refp = {data:null, hist:[], busy:false, fails:0, recvAt:0, notConfigured:false};
+var REFP_HIST_KEEP_MS = 5 * 60000;
+async function refpricePoll(){
+  if (sessionClosed || refp.busy || document.hidden) return;
+  refp.busy = true;
+  try {
+    var res = await callApi('refprice', 'get-vwap', {});
+    var d = res && res.payload;
+    if (d && typeof d.vwap !== 'undefined'){
+      refp.notConfigured = false; refp.data = d; refp.recvAt = Date.now();
+      if (d.vwap != null && isFinite(d.totalVolume)){
+        refp.hist.push({t:refp.recvAt, vwap:d.vwap, totalVolume:d.totalVolume});
+        refp.hist = refp.hist.filter(function(h){ return refp.recvAt - h.t <= REFP_HIST_KEEP_MS; });
+      }
+      refp.fails = 0;
+    } else {
+      refp.fails++;
+      if (refp.fails >= 3) refp.notConfigured = true;
+    }
+  } catch (e) {
+    // same stance as the Kalshi live feed: this is optional, so an unreachable worker just stays quiet
+    refp.fails++;
+    if (refp.fails >= 3) refp.notConfigured = true;
+  } finally { refp.busy = false; renderRefp(); tick(); }
+}
+/* Volume trend over the last ~60s: how much total cross-exchange 24h volume rose (or fell) since
+   the oldest sample still within that window. A rising total means fresh trading activity is
+   actually showing up across venues right now, not just that 24h volume is naturally large. */
+function refVolTrend(){
+  if (refp.hist.length < 2) return null;
+  var now = refp.hist[refp.hist.length - 1];
+  var cutoff = now.t - 60000;
+  var base = null;
+  for (var i = 0; i < refp.hist.length; i++){ if (refp.hist[i].t >= cutoff){ base = refp.hist[i]; break; } }
+  if (!base || base === now || !(base.totalVolume > 0)) return null;
+  var pct = (now.totalVolume - base.totalVolume) / base.totalVolume * 100;
+  return {pct:pct, rising:pct > 0, seconds:(now.t - base.t) / 1000};
+}
+function renderRefp(){
+  var line = $('refpLine'), summary = $('refpSummary'), body = $('refpBody');
+  if (!line || !summary || !body) return;
+  if (refp.notConfigured){
+    line.textContent = ''; summary.textContent = 'Could not reach the refprice-proxy Worker (' + API_BASE.refprice + '). Check it is deployed and the URL in this page is correct. This feature is optional — everything else on the page works without it.';
+    body.innerHTML = ''; return;
+  }
+  var d = refp.data;
+  if (!d){ line.textContent = ''; summary.textContent = 'Waiting for the first read…'; body.innerHTML = ''; return; }
+  if (d.vwap != null){
+    var diff = lastPrice != null ? d.vwap - lastPrice : null;
+    line.textContent = 'Cross-exchange ref: ' + fmt(d.vwap) + ' (' + d.sourcesUsed + '/' + d.sourcesTotal + ' exchanges' + (diff != null ? ', ' + (diff >= 0 ? '+' : '−') + fmt(Math.abs(diff)) + ' vs this page’s price' : '') + ')';
+  } else {
+    line.textContent = 'Cross-exchange ref: no exchange answered just now.';
+  }
+  var trend = refVolTrend();
+  var totVolTxt = isFinite(d.totalVolume) ? d.totalVolume.toLocaleString(undefined, {maximumFractionDigits:1}) : '—';
+  summary.textContent = d.sourcesUsed + ' of ' + d.sourcesTotal + ' exchanges answered, ' + totVolTxt + ' BTC combined 24h volume' + (trend ? ', ' + (trend.rising ? '+' : '−') + Math.abs(trend.pct).toFixed(1) + '% over the last ' + Math.round(trend.seconds) + 's' : '') + '. (read ' + ((Date.now() - refp.recvAt) / 1000).toFixed(0) + 's ago)';
+  body.innerHTML = '';
+  var names = {coinbase:'Coinbase', kraken:'Kraken', bitstamp:'Bitstamp', gemini:'Gemini', bullish:'Bullish', itbit:'itBit'};
+  Object.keys(names).forEach(function(k){
+    var e = (d.exchanges || {})[k];
+    var tr = document.createElement('tr'), a = document.createElement('td'), b = document.createElement('td'), c = document.createElement('td');
+    a.textContent = names[k];
+    if (e && e.error){ b.textContent = '—'; c.textContent = e.error; c.className = 'prob-meta'; }
+    else if (e){ b.textContent = fmt(e.price); c.textContent = isFinite(e.volume) ? e.volume.toFixed(2) : '—'; }
+    else { b.textContent = '—'; c.textContent = '—'; }
+    tr.appendChild(a); tr.appendChild(b); tr.appendChild(c); body.appendChild(tr);
+  });
 }
 
 /* ---------- Kalshi's official settlement values ----------
@@ -2719,7 +2828,7 @@ var READY_CATEGORY = {
   'Re-entry time left':'Entry quality', 'Position size':'Entry quality',
   'Trend gate':'Market conditions', 'Trend gate (extra edge)':'Market conditions', 'Support/resistance':'Market conditions',
   'Fast vs slow indicators':'Market conditions', 'Intra-window consistency':'Market conditions', 'Edge vs Kalshi price':'Market conditions',
-  'Volume POC':'Market conditions',
+  'Volume POC':'Market conditions', 'Volume confirmation':'Market conditions',
   'Price adjustment':'Safety & data quality', 'Strike sanity':'Safety & data quality', 'Strike vs last close':'Safety & data quality',
   'Same-side streak':'Safety & data quality',
 };
@@ -3616,6 +3725,22 @@ function gateChecklist(side, o, left){
       message:'The strike ' + fmt(o.K) + ' sits ' + pocGapPct.toFixed(2) + '% from ' + fmt(vp.poc) + ', the point of control — the price level with the heaviest traded volume over the last ' + vp.n + ' candles, between the value-area bounds ' + fmt(vp.val) + '–' + fmt(vp.vah) + '. Price has tended to gravitate back toward high-volume levels like this one.'});
   }
 
+  /* Cross-exchange 24h volume (Coinbase/Kraken/Bitstamp/Gemini/Bullish/itBit, via refprice-proxy)
+     rising over the last minute, as a confirmation that a signal has real trading activity behind
+     it rather than drifting on thin volume. Volume itself has no direction, so this does not check
+     whether the rise "agrees" with the side being bet -- only whether there is a meaningful rise
+     at all; informational unless switched on, and simply absent if refprice-proxy isn't reachable
+     or there isn't 60s of history yet. */
+  var volTrend = (!refp.notConfigured && refp.data) ? refVolTrend() : null;
+  if (volTrend){
+    var volNeedPct = +$('volConfirmPct').value || 5;
+    var volConfirmed = volTrend.rising && volTrend.pct >= volNeedPct;
+    var volBlock = $('volConfirmOn').checked;
+    out.push({label:'Volume confirmation', pass:!volBlock || volConfirmed,
+      value:(volTrend.rising ? '+' : '−') + Math.abs(volTrend.pct).toFixed(1) + '% cross-exchange volume over ' + Math.round(volTrend.seconds) + 's (need ≥ ' + volNeedPct + '% rising)',
+      message:'Combined 24h traded volume across Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit has ' + (volTrend.rising ? 'risen' : 'fallen') + ' ' + Math.abs(volTrend.pct).toFixed(1) + '% over the last ' + Math.round(volTrend.seconds) + ' seconds, short of the ' + volNeedPct + '% rise you asked for as confirmation that real trading activity backs this move.'});
+  }
+
   var iw = intraWindowConsistency(side, o.E);
   if (iw){
     var iwNeed = +$('intraWinMin').value / 100, iwBlock = $('intraWinBlockOn').checked;
@@ -4179,6 +4304,10 @@ $('pocBlockOn').checked = get('cs_pocblock_on_v1', '0') === '1';
 $('pocProxPct').value = get('cs_poc_proxpct_v1', '0.1');
 $('pocBlockOn').addEventListener('change', function(){ put('cs_pocblock_on_v1', $('pocBlockOn').checked ? '1' : '0'); autoHold = null; autoCheck(); tick(); });
 $('pocProxPct').addEventListener('change', function(){ put('cs_poc_proxpct_v1', $('pocProxPct').value); autoHold = null; autoCheck(); tick(); });
+$('volConfirmOn').checked = get('cs_volconfirm_on_v1', '0') === '1';
+$('volConfirmPct').value = get('cs_volconfirm_pct_v1', '5');
+$('volConfirmOn').addEventListener('change', function(){ put('cs_volconfirm_on_v1', $('volConfirmOn').checked ? '1' : '0'); autoHold = null; autoCheck(); tick(); });
+$('volConfirmPct').addEventListener('change', function(){ put('cs_volconfirm_pct_v1', $('volConfirmPct').value); autoHold = null; autoCheck(); tick(); });
 $('autoMom').addEventListener('change', function(){ put(K.autoMom, $('autoMom').checked ? '1' : '0'); autoHold = null; autoCheck(); });
 $('betOver').addEventListener('click', function(){ placeBet('above'); });
 $('betUnder').addEventListener('click', function(){ placeBet('below'); });
@@ -4251,6 +4380,8 @@ setInterval(newsPoll, NEWS_EVERY_MS);
 setInterval(avPricePoll, AV_PRICE_EVERY_MS);
 setInterval(kalshiPoll, 1000);
 setInterval(kalshiLivePoll, 1000);
+refpricePoll();
+setInterval(refpricePoll, 5000);
 setInterval(khTick, 30000);
 setTimeout(khTick, 6000);
 setInterval(tapePoll, 3000);
