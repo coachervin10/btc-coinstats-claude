@@ -1617,7 +1617,11 @@ async function refpricePoll(){
     // same stance as the Kalshi live feed: this is optional, so an unreachable worker just stays quiet
     refp.fails++;
     if (refp.fails >= 3) refp.notConfigured = true;
-  } finally { refp.busy = false; renderRefp(); tick(); }
+  } finally {
+    refp.busy = false;
+    try { renderRefp(); } catch (e) { /* optional display only -- never let it skip the tick() call below */ }
+    tick();
+  }
 }
 /* Volume trend over the last ~60s: how much total cross-exchange 24h volume rose (or fell) since
    the oldest sample still within that window. A rising total means fresh trading activity is
@@ -3731,14 +3735,19 @@ function gateChecklist(side, o, left){
      whether the rise "agrees" with the side being bet -- only whether there is a meaningful rise
      at all; informational unless switched on, and simply absent if refprice-proxy isn't reachable
      or there isn't 60s of history yet. */
-  var volTrend = (!refp.notConfigured && refp.data) ? refVolTrend() : null;
-  if (volTrend){
-    var volNeedPct = +$('volConfirmPct').value || 5;
-    var volConfirmed = volTrend.rising && volTrend.pct >= volNeedPct;
-    var volBlock = $('volConfirmOn').checked;
-    out.push({label:'Volume confirmation', pass:!volBlock || volConfirmed,
-      value:(volTrend.rising ? '+' : '−') + Math.abs(volTrend.pct).toFixed(1) + '% cross-exchange volume over ' + Math.round(volTrend.seconds) + 's (need ≥ ' + volNeedPct + '% rising)',
-      message:'Combined 24h traded volume across Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit has ' + (volTrend.rising ? 'risen' : 'fallen') + ' ' + Math.abs(volTrend.pct).toFixed(1) + '% over the last ' + Math.round(volTrend.seconds) + ' seconds, short of the ' + volNeedPct + '% rise you asked for as confirmation that real trading activity backs this move.'});
+  try {
+    var volTrend = (!refp.notConfigured && refp.data) ? refVolTrend() : null;
+    if (volTrend){
+      var volNeedPct = +$('volConfirmPct').value || 5;
+      var volConfirmed = volTrend.rising && volTrend.pct >= volNeedPct;
+      var volBlock = $('volConfirmOn').checked;
+      out.push({label:'Volume confirmation', pass:!volBlock || volConfirmed,
+        value:(volTrend.rising ? '+' : '−') + Math.abs(volTrend.pct).toFixed(1) + '% cross-exchange volume over ' + Math.round(volTrend.seconds) + 's (need ≥ ' + volNeedPct + '% rising)',
+        message:'Combined 24h traded volume across Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit has ' + (volTrend.rising ? 'risen' : 'fallen') + ' ' + Math.abs(volTrend.pct).toFixed(1) + '% over the last ' + Math.round(volTrend.seconds) + ' seconds, short of the ' + volNeedPct + '% rise you asked for as confirmation that real trading activity backs this move.'});
+    }
+  } catch (e) {
+    // this is new, optional, and reads from a separate Worker -- it must never be able to break
+    // the rest of the checklist (and with it, auto-trading) if something about it goes wrong
   }
 
   var iw = intraWindowConsistency(side, o.E);
