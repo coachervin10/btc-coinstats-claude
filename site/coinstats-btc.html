@@ -285,14 +285,17 @@ body.view-simple .adv{ display:none !important; }
           Each indicator votes from −1 (down) to +1 (up). Readings that measure the same thing are grouped so they count once:
           RSI, Stochastic, Awesome and Accelerator are one momentum vote, the EMA-9/21 trend and 30-minute change are one vote, and the order
           book and taker flow are one vote. Bollinger, prior-candle momentum, the 1-minute EMA cross, the 2-minute change, the price against its
-          hourly VWAP and the mark/index basis are one vote each, and the three volume readings (5-minute, 15-minute and signed) are one vote
-          together, and the composite is the average of the votes. RSI and the 5-minute EMA still come from CoinStats' chart (refreshed every 2
+          hourly VWAP and the mark/index basis are one vote each, and the volume/flow readings (5-minute, 15-minute and hourly-signed volume,
+          cumulative volume delta for this window, and open-interest change) are one vote together, and the composite is the average of the
+          votes. The funding rate is its own vote, and it's a different kind of read from the rest: a crowding/reversion signal (very positive
+          funding leans the vote down, not up, since it means longs are paying a premium to stay long) rather than a trend-following one, so it
+          can pull against the others on purpose. RSI and the 5-minute EMA still come from CoinStats' chart (refreshed every 2
           minutes). Stochastic, the Awesome and Accelerator Oscillators, Bollinger and prior-candle momentum use real 15-minute candles from
           Crypto.com when its signals are on, falling back to bars built by joining three of CoinStats' 5-minute points otherwise (marked
           "approx.", with approximate highs and lows). The 30-minute change and a 1-minute EMA cross use real Crypto.com candles at those
-          timeframes; the 2-minute change comes from this page's own live prices; and the order book, taker flow, volume and basis come from
-          Crypto.com's trade and book data when ticked. It can only shift the odds a little; the size of the move needed to reach your strike
-          still does most of the work. Abnormal volume (over 3 times the
+          timeframes; the 2-minute change comes from this page's own live prices; and the order book, taker flow, volume, CVD, open interest,
+          funding rate and basis come from Crypto.com's trade, book and derivatives data when ticked. It can only shift the odds a little; the
+          size of the move needed to reach your strike still does most of the work. Abnormal volume (over 3 times the
           norm) widens the odds instead of pointing a direction. Momentum can enter the odds two ways: as a flat nudge of up to 8 points,
           or as a drift, which shifts where the price is expected to end up. A drift matters most near the strike and fades for
           strikes far away, which is how a real drift would behave.
@@ -301,7 +304,7 @@ body.view-simple .adv{ display:none !important; }
 
       <div class="card adv" id="card-orderflow">
         <div class="card-head" id="head-orderflow"><h2>Order flow (Crypto.com)</h2><span class="card-chevron">▾</span></div>
-        <label class="row" style="margin-bottom:10px;"><input type="checkbox" id="useCdc" checked><span>use Crypto.com's order book, taker flow and volume as signals. The price itself stays CoinStats-only.</span></label>
+        <label class="row" style="margin-bottom:10px;"><input type="checkbox" id="useCdc" checked><span>use Crypto.com's order book, taker flow, volume, open interest and funding rate as signals. The price itself stays CoinStats-only.</span></label>
         <svg id="flowChart" role="img" aria-label="Order book imbalance and taker flow over the last 15 minutes"></svg>
         <div class="prob-meta" id="flowNote" style="margin-top:8px;"></div>
       </div>
@@ -900,7 +903,7 @@ async function callApi(server, tool, input){
     else throw {code:'bad_shape', message:'coinstats-proxy has no route for ' + tool};
   } else if (server === 'Crypto.com'){
     base = API_BASE.cryptocom;
-    var cdcMap = {get_book:'/book', get_trades:'/trades', get_candlestick:'/candlestick', get_mark_price:'/mark-price', get_index_price:'/index-price'};
+    var cdcMap = {get_book:'/book', get_trades:'/trades', get_candlestick:'/candlestick', get_mark_price:'/mark-price', get_index_price:'/index-price', get_funding_rate:'/funding-rate', get_open_interest:'/open-interest'};
     path = cdcMap[tool];
     if (!path) throw {code:'bad_shape', message:'cryptocom-proxy has no route for ' + tool};
     Object.keys(input).forEach(function(k){ qs.set(k, input[k]); });
@@ -1281,8 +1284,34 @@ function updateShortVol(){
 }
 
 /* ---------- Crypto.com signals: order book, taker flow, volume (the price stays CoinStats-only) ---------- */
-var cdc = {book:null, trades:null, candles:null, candles1:null, candles1At:0, candles15:null, candles30:null, candlesAt:0, basis:null, msg:'', busy:false, fails:0};
+var cdc = {book:null, trades:null, candles:null, candles1:null, candles1At:0, candles15:null, candles30:null, candlesAt:0, basis:null, funding:null, oi:null, msg:'', busy:false, fails:0};
 var basisHist = [];
+var fundingHist = [];
+/* Open interest history (BTCUSD-PERP), kept so "is OI rising or falling" can be read off a recent
+   window rather than one noisy instant-to-instant comparison. */
+var oiHist = [], OI_KEEP_MS = 20 * 60000;
+/* Cumulative volume delta for the window currently being bet on: real buyer-vs-seller trade flow
+   (Crypto.com's own side tag per trade, not a candle-close proxy), reset at every 15-minute roll.
+   De-duplicated by a per-trade signature since the trades feed re-sends overlapping recent trades
+   on every poll, not just new ones. */
+var cvd = {windowStart:0, buyVol:0, sellVol:0, seen:new Set()};
+function cvdWindowStartMs(){ return expiryMs(Date.now()) - (+$('period').value || 15) * 60000; }
+function updateCvd(trades){
+  var ws = cvdWindowStartMs();
+  if (cvd.windowStart !== ws){ cvd.windowStart = ws; cvd.buyVol = 0; cvd.sellVol = 0; cvd.seen = new Set(); }
+  (trades || []).forEach(function(t){
+    if (!(t.ts >= ws) || !(t.qty > 0) || (t.side !== 'buy' && t.side !== 'sell')) return;
+    var key = t.ts + '|' + t.price + '|' + t.qty + '|' + t.side;
+    if (cvd.seen.has(key)) return;
+    cvd.seen.add(key);
+    if (t.side === 'buy') cvd.buyVol += t.qty; else cvd.sellVol += t.qty;
+  });
+}
+function cvdSignal(){
+  var total = cvd.buyVol + cvd.sellVol;
+  if (!total) return null;
+  return {net:cvd.buyVol - cvd.sellVol, total:total, lean:clamp((cvd.buyVol - cvd.sellVol) / total, -1, 1), sinceMs:Date.now() - cvd.windowStart};
+}
 var flowHist = [];
 function readNumber(res, field){
   function walk(o, depth){
@@ -1852,7 +1881,9 @@ async function cdcPoll(){
       ['book', cdcCall('get_book', {instrument_name:'BTC_USD', depth:50})],
       ['trades', cdcCall('get_trades', {instrument_name:'BTC_USD', count:150})],
       ['mark', cdcCall('get_mark_price', {instrument_name:'BTCUSD-PERP'}).catch(function(){ return null; })],
-      ['index', cdcCall('get_index_price', {instrument_name:'BTCUSD-INDEX'}).catch(function(){ return null; })]
+      ['index', cdcCall('get_index_price', {instrument_name:'BTCUSD-INDEX'}).catch(function(){ return null; })],
+      ['funding', cdcCall('get_funding_rate', {instrument_name:'BTCUSD-PERP'}).catch(function(){ return null; })],
+      ['oi', cdcCall('get_open_interest', {instrument_name:'BTCUSD-PERP'}).catch(function(){ return null; })]
     ];
     if (need1) jobs.push(['c1', cdcCall('get_candlestick', {instrument_name:'BTC_USD', timeframe:'1m'}).catch(function(){ return null; })]);
     if (need5) jobs.push(['c5', cdcCall('get_candlestick', {instrument_name:'BTC_USD', timeframe:'5m'}).catch(function(){ return null; })]);
@@ -1865,6 +1896,11 @@ async function cdcPoll(){
     cdc.book = {bids:(book.bids || []).map(function(b){ return [+b.price, +b.qty]; }), asks:(book.asks || []).map(function(a){ return [+a.price, +a.qty]; }), at:now};
     cdc.trades = (tr.data || []).map(function(t){ return {price:+t.price, qty:+t.qty, side:t.side, ts:Date.parse(t.timestamp)}; });
     tapeAdd(cdc.trades);
+    updateCvd(cdc.trades);
+    var fr = out.funding && out.funding.payload;
+    if (fr && (fr.fundingRate != null || fr.estimatedFundingRate != null)) cdc.funding = {fundingRate:fr.fundingRate, estimatedFundingRate:fr.estimatedFundingRate, at:now};
+    var oiR = readNumber(out.oi, 'openInterest');
+    if (oiR > 0){ cdc.oi = {value:oiR, at:now}; oiHist.push({t:now, v:oiR}); oiHist = oiHist.filter(function(x){ return now - x.t <= OI_KEEP_MS; }); }
     if (need1 && out.c1){ var cd1 = readObj(out.c1, 'data'); if (cd1){ cdc.candles1 = parseCandles(cd1); cdc.candles1At = now; } }
     if (need5){
       if (out.c5){ var cd5 = readObj(out.c5, 'data'); if (cd5){ cdc.candles = parseCandles(cd5); cdc.candlesAt = now; } }
@@ -1896,7 +1932,8 @@ function cdcSignals(){
   cdc.trades.forEach(function(t){ if (now - t.ts <= 60000){ if (t.side === 'buy') buy += t.qty; else if (t.side === 'sell') sell += t.qty; } });
   var flowLean = (buy + sell) ? (buy - sell) / (buy + sell) : 0;
   var out = {obLean:obLean, flowLean:flowLean, bidV:bidV, askV:askV, buy:buy, sell:sell, volRatio:null, volLean:0, spike:false,
-             vol15Ratio:null, vol15Lean:0, obvShare:null, obvLean:0, vwap:null, vwapDev:null, vwapLean:0};
+             vol15Ratio:null, vol15Lean:0, obvShare:null, obvLean:0, vwap:null, vwapDev:null, vwapLean:0,
+             fundingRate:null, estFundingRate:null, fundingLean:0, oi:null, oiChangePct:null, oiLean:0};
   var cs = (cdc.candles || []).filter(function(c){ return c.ts + 300000 <= now; });
   if (cs.length >= 21){
     var lastC = cs[cs.length - 1], prev = cs.slice(-21, -1), avg = prev.reduce(function(a, c){ return a + c.volume; }, 0) / prev.length;
@@ -1934,6 +1971,33 @@ function cdcSignals(){
         out.vwapDev = (ref - out.vwap) / out.vwap;
         out.vwapLean = clamp(out.vwapDev / (2 * (vol ? vol.slow : 0.0008) * Math.sqrt(6)), -1, 1);
       }
+    }
+  }
+  /* Funding rate: a crowding/reversion signal, not a trend one -- very positive funding means longs
+     are paying a premium to stay long (crowded, more prone to a squeeze lower), so the lean here
+     runs AGAINST the sign of the rate, scaled against its own recent magnitude the same way the
+     basis reading above scales against basisHist (there's no natural fixed threshold for "extreme"
+     funding, so this adapts to whatever's typical recently instead of assuming a hardcoded number). */
+  if (cdc.funding && now - cdc.funding.at <= 90000 && cdc.funding.fundingRate != null){
+    fundingHist.push(Math.abs(cdc.funding.fundingRate)); if (fundingHist.length > 30) fundingHist.shift();
+    var fAvgAbs = fundingHist.length ? fundingHist.reduce(function(a, x){ return a + x; }, 0) / fundingHist.length : Math.abs(cdc.funding.fundingRate);
+    out.fundingRate = cdc.funding.fundingRate; out.estFundingRate = cdc.funding.estimatedFundingRate;
+    out.fundingLean = clamp(-cdc.funding.fundingRate / (Math.max(fAvgAbs, 1e-6) * 2), -1, 1);
+  }
+  /* Open interest, rising or falling over the last 5 minutes, read together with price direction over
+     the same stretch -- price up with OI up is new money confirming the move; price up with OI down
+     is more likely short-covering, which tends to run out of steam faster. Same adaptive-threshold
+     style as the volume-ratio readings above: scaled against this page's own recent OI-change history,
+     not a guessed fixed percentage. */
+  if (cdc.oi && now - cdc.oi.at <= 90000 && oiHist.length >= 2){
+    var oiCut = now - 5 * 60000, oiBase = null;
+    for (var oiI = 0; oiI < oiHist.length; oiI++){ if (oiHist[oiI].t >= oiCut){ oiBase = oiHist[oiI]; break; } }
+    if (oiBase && oiBase.v > 0 && oiBase.t !== now){
+      var oiChangePct = (cdc.oi.value - oiBase.v) / oiBase.v;
+      out.oi = cdc.oi.value; out.oiChangePct = oiChangePct;
+      var oiDirSign = null;
+      if (cs.length >= 2) oiDirSign = cs[cs.length - 1].close > cs[cs.length - 2].close ? 1 : (cs[cs.length - 1].close < cs[cs.length - 2].close ? -1 : 0);
+      if (oiDirSign != null) out.oiLean = clamp(oiDirSign * Math.min(1, Math.abs(oiChangePct) / 0.01), -1, 1);  // 1% OI move, 5 minutes = full lean
     }
   }
   return out;
@@ -2091,10 +2155,23 @@ function computeMomentumRaw(){
       items.push({name:'Signed volume, last hour', src:'Crypto.com', val:'net ' + (sig.obvShare >= 0 ? '+' : '\u2212') + Math.abs(sig.obvShare * 100).toFixed(0) + '% of volume', lean:sig.obvLean});
       volLeans.push(sig.obvLean);
     }
-    if (volLeans.length) factors.push(volLeans.reduce(function(a, x){ return a + x; }, 0) / volLeans.length);   // the volume readings count once
+    var cvdSig = cvdSignal();
+    if (cvdSig){
+      items.push({name:'CVD, this window', src:'Crypto.com', val:'net ' + (cvdSig.lean >= 0 ? '+' : '\u2212') + Math.abs(cvdSig.lean * 100).toFixed(0) + '% of ' + cvdSig.total.toFixed(2) + ' BTC traded', lean:cvdSig.lean});
+      volLeans.push(cvdSig.lean);
+    }
+    if (sig.oiChangePct != null){
+      items.push({name:'Open interest, 5 min', src:'Crypto.com', val:(sig.oiChangePct >= 0 ? '+' : '\u2212') + Math.abs(sig.oiChangePct * 100).toFixed(2) + '% (' + sig.oi.toFixed(1) + ' BTC now)', lean:sig.oiLean});
+      volLeans.push(sig.oiLean);
+    }
+    if (volLeans.length) factors.push(volLeans.reduce(function(a, x){ return a + x; }, 0) / volLeans.length);   // all the volume/flow readings (ratio, signed-volume, CVD, open interest) count once together
     if (sig.vwapDev != null){
       items.push({name:'Price vs 60-min VWAP', src:'Crypto.com', val:signedPct(sig.vwapDev, 3) + '% (VWAP ' + fmt(sig.vwap) + ')', lean:sig.vwapLean});
       factors.push(sig.vwapLean);
+    }
+    if (sig.fundingRate != null){
+      items.push({name:'Funding rate (crowding)', src:'Crypto.com', val:(sig.fundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.fundingRate) * 100).toFixed(4) + '%' + (sig.estFundingRate != null ? ', next est. ' + (sig.estFundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.estFundingRate) * 100).toFixed(4) + '%' : ''), lean:sig.fundingLean});
+      factors.push(sig.fundingLean);                                                    // its own vote -- a crowding/reversion read, not a trend one
     }
   }
   if ($('useCdc').checked && cdc.basis && Date.now() - cdc.basis.at <= 45000){
@@ -2965,7 +3042,8 @@ function drawFlowChart(){
   function line(key, color, dash){ return '<path d="' + pts.map(function(p, j){ return (j ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' + Y(p[key]).toFixed(1); }).join('') + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>'; }
   o.push(line('ob', 'var(--amber)', '5 3')); o.push(line('flow', 'var(--text)', ''));
   svg.innerHTML = o.join('');
-  note.textContent = 'Solid: taker flow over the last 60 seconds (buyers +1, sellers \u22121). Dashed: resting order book within 0.5% (bids +1, asks \u22121).' + (sig ? ' Now: flow ' + (sig.flowLean >= 0 ? '+' : '\u2212') + Math.abs(sig.flowLean).toFixed(2) + ', book ' + (sig.obLean >= 0 ? '+' : '\u2212') + Math.abs(sig.obLean).toFixed(2) + (sig.volRatio != null ? ', volume ' + sig.volRatio.toFixed(2) + '\u00d7 its 20-bar average' : '') + '.' : '') + (cdc.msg ? ' ' + cdc.msg : '');
+  var cvdSig2 = cvdSignal();
+  note.textContent = 'Solid: taker flow over the last 60 seconds (buyers +1, sellers \u22121). Dashed: resting order book within 0.5% (bids +1, asks \u22121).' + (sig ? ' Now: flow ' + (sig.flowLean >= 0 ? '+' : '\u2212') + Math.abs(sig.flowLean).toFixed(2) + ', book ' + (sig.obLean >= 0 ? '+' : '\u2212') + Math.abs(sig.obLean).toFixed(2) + (sig.volRatio != null ? ', volume ' + sig.volRatio.toFixed(2) + '\u00d7 its 20-bar average' : '') + (cvdSig2 ? ', CVD this window ' + (cvdSig2.lean >= 0 ? '+' : '\u2212') + Math.abs(cvdSig2.lean * 100).toFixed(0) + '%' : '') + (sig.oiChangePct != null ? ', OI ' + (sig.oiChangePct >= 0 ? '+' : '\u2212') + Math.abs(sig.oiChangePct * 100).toFixed(2) + '% / 5min' : '') + (sig.fundingRate != null ? ', funding ' + (sig.fundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.fundingRate) * 100).toFixed(4) + '%' : '') + '.' : '') + (cdc.msg ? ' ' + cdc.msg : '');
 }
 function minBaseNow(){ return +$('autoMinBase').value || 0; }
 
@@ -4189,7 +4267,7 @@ $('newsLookback').addEventListener('change', function(){ put('cs_autonews_lookba
 $('volSpeed').value = get('cs_vol_speed_v1', '2');
 $('volSpeed').addEventListener('change', function(){ put('cs_vol_speed_v1', $('volSpeed').value); updateShortVol(); tick(); });
 $('fat').addEventListener('change', function(){ put(K.fat, $('fat').checked ? '1' : '0'); tick(); });
-$('useCdc').addEventListener('change', function(){ put(K.cdc, $('useCdc').checked ? '1' : '0'); if ($('useCdc').checked) cdcPoll(); else { cdc.book = null; cdc.trades = null; flowHist = []; cdc.msg = ''; } tick(); });
+$('useCdc').addEventListener('change', function(){ put(K.cdc, $('useCdc').checked ? '1' : '0'); if ($('useCdc').checked) cdcPoll(); else { cdc.book = null; cdc.trades = null; cdc.funding = null; cdc.oi = null; flowHist = []; oiHist = []; fundingHist = []; cvd = {windowStart:0, buyVol:0, sellVol:0, seen:new Set()}; cdc.msg = ''; } tick(); });
 $('momMode').addEventListener('change', function(){ put(K.momMode, $('momMode').value); tick(); });
 $('driftHr').addEventListener('input', function(){ put(K.drift, $('driftHr').value); tick(); });
 $('setCurrent').addEventListener('click', function(){ var p = nowPrice(); if (p != null){ $('strike').value = Math.round(p); put(K.strike, $('strike').value); markStrikeSet(); tick(); } });

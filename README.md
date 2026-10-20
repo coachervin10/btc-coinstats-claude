@@ -90,6 +90,30 @@ unavailable rather than erroring loudly:
 Both are optional — the core page (price tracking, the model, paper trading, the Kalshi strike
 comparison) works fully without them.
 
+## Three new order-flow signals (CVD, open interest, funding rate)
+
+Added to `cryptocom-proxy` and wired into the page's live momentum model (not just the Trade
+Readiness checklist — these three change the model's actual probability output, the same as every
+other indicator already in there):
+
+- **Cumulative volume delta (CVD), this window** — net buyer-initiated minus seller-initiated
+  trade volume since the current 15-minute window opened, using Crypto.com's own per-trade side
+  tag (not a candle-close proxy). Counts as part of the existing "volume readings" vote alongside
+  the 5-/15-minute volume ratios and the hourly signed-volume reading.
+- **Open interest change, 5 minutes** — read together with price direction over the same stretch:
+  price and OI rising together reads as real money confirming the move; price up with OI falling
+  reads as more likely short-covering. Also counts as part of the volume-readings vote.
+- **Funding rate** — its own, separate vote, and deliberately a different *kind* of signal from
+  the rest: very positive funding means longs are paying a premium to stay long (crowded, more
+  prone to a squeeze lower), so this one leans against the sign of the rate rather than with it.
+  It's a crowding/reversion read, not a trend-following one, and can pull against the other votes
+  on purpose.
+
+All three are scaled against their own recent history (the same adaptive-threshold style the
+existing mark/index basis reading already uses) rather than a guessed fixed number, since there's
+no textbook-normal value for things like "typical open interest change over 5 minutes" for this
+specific instrument.
+
 ## Cross-exchange reference price (`refprice-proxy`)
 
 `workers/refprice-proxy` fetches Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit's public
@@ -156,7 +180,7 @@ already-deployed Worker URLs) instead of the `__CF_SUBDOMAIN__` placeholders.
 ```
 workers/
   coinstats-proxy/    CoinStats prices + chart data (needs COINSTATS_API_KEY)
-  cryptocom-proxy/     Crypto.com order book/trades/candles/mark+index price (no key needed)
+  cryptocom-proxy/     Crypto.com order book/trades/candles/mark+index price/funding rate/open interest (no key needed)
   newsflow-proxy/      Alpha Vantage news sentiment + FX rate (needs ALPHA_VANTAGE_API_KEY)
   kalshi-btc15/        Kalshi 15-min BTC market (existing MCP route + new REST routes)
   paper-store/         D1-backed cross-device paper-trading persistence

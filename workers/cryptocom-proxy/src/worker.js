@@ -19,6 +19,8 @@
  *   /candlestick?instrument_name=BTC_USD&timeframe=1m   (timeframe: 1m/5m/15m/30m/1h/...)
  *   /mark-price?instrument_name=BTCUSD-PERP
  *   /index-price?instrument_name=BTCUSD-INDEX
+ *   /funding-rate?instrument_name=BTCUSD-PERP      -- { fundingRate, estimatedFundingRate, timestamp }
+ *   /open-interest?instrument_name=BTCUSD-PERP     -- { openInterest, timestamp }
  */
 
 const UPSTREAM = 'https://api.crypto.com/exchange/v1/public';
@@ -115,6 +117,34 @@ async function handleValuation(instrumentName, valuationType) {
   return json(200, { payload: { price: last ? num(last.v) : null } });
 }
 
+/* get-valuations, two calls in parallel: the settled rate for the period just closed
+   (funding_rate) and the rate currently accruing toward the next settlement
+   (estimated_funding_rate). Both confirmed live against BTCUSD-PERP while building this --
+   values are small fractions per funding interval (e.g. 0.000014 = 0.0014%), not percentages
+   and not annualized. */
+async function handleFundingRate(instrumentName) {
+  const mk = (vt) => upstreamGet('/get-valuations', new URLSearchParams({ instrument_name: instrumentName, valuation_type: vt, count: '1' }));
+  const [cur, est] = await Promise.all([mk('funding_rate'), mk('estimated_funding_rate')]);
+  if (!cur.ok && !est.ok) return json(cur.status || est.status, { error: 'cryptocom_upstream_error', detail: cur.detail || est.detail });
+  const last = (r) => { const rows = r.ok && Array.isArray(r.result && r.result.data) ? r.result.data : []; return rows.length ? rows[rows.length - 1] : null; };
+  const lc = last(cur), le = last(est);
+  return json(200, { payload: {
+    fundingRate: lc ? num(lc.v) : null,
+    estimatedFundingRate: le ? num(le.v) : null,
+    timestamp: iso((lc && lc.t) || (le && le.t) || Date.now()),
+  } });
+}
+
+/* get-tickers: result.data[0].oi (string) is open interest in the base currency (BTC), .t is epoch ms.
+   Confirmed live against BTCUSD-PERP while building this. */
+async function handleOpenInterest(instrumentName) {
+  const r = await upstreamGet('/get-tickers', new URLSearchParams({ instrument_name: instrumentName }));
+  if (!r.ok) return json(r.status, { error: 'cryptocom_upstream_error', detail: r.detail });
+  const row = r.result && Array.isArray(r.result.data) ? r.result.data[0] : null;
+  if (!row) return json(502, { error: 'cryptocom_upstream_error', detail: 'no ticker data in response' });
+  return json(200, { payload: { openInterest: num(row.oi), timestamp: iso(row.t) } });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -131,6 +161,8 @@ export default {
     if (url.pathname === '/candlestick') return withCache(request, ctx, url.pathname, q, Number(env.CANDLE_CACHE_S || 15), () => handleCandlestick(instrumentName, q.get('timeframe')));
     if (url.pathname === '/mark-price') return withCache(request, ctx, url.pathname, q, Number(env.VALUATION_CACHE_S || 3), () => handleValuation(instrumentName, 'mark_price'));
     if (url.pathname === '/index-price') return withCache(request, ctx, url.pathname, q, Number(env.VALUATION_CACHE_S || 3), () => handleValuation(instrumentName, 'index_price'));
+    if (url.pathname === '/funding-rate') return withCache(request, ctx, url.pathname, q, Number(env.FUNDING_CACHE_S || 30), () => handleFundingRate(instrumentName));
+    if (url.pathname === '/open-interest') return withCache(request, ctx, url.pathname, q, Number(env.OI_CACHE_S || 10), () => handleOpenInterest(instrumentName));
 
     return json(404, { error: 'not_found' });
   },

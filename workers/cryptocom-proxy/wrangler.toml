@@ -12,3 +12,7 @@ compatibility_date = "2026-09-01"
 BOOK_TRADES_CACHE_S = "2"
 CANDLE_CACHE_S = "15"
 VALUATION_CACHE_S = "3"
+# Funding rate and open interest both change slowly compared to price -- cached longer than the
+# valuation types above to cut down on upstream calls for data that's barely moved.
+FUNDING_CACHE_S = "30"
+OI_CACHE_S = "10"
