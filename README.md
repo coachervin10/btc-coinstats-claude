@@ -278,8 +278,14 @@ code path in this Worker that could trade or withdraw even if you wanted it to.
 2. Check **only** the **View** permission. Leave **Trade**, **Transfer**, and **Receive**
    unchecked -- this is what actually makes the key incapable of trading or withdrawing, enforced
    by Coinbase itself, independent of anything this repo's code does.
-3. Coinbase shows you a key name (`organizations/{org_id}/apiKeys/{key_id}`) and a PEM-formatted
-   private key **once**, at creation time. Copy both immediately.
+3. Coinbase shows you a key name (`organizations/{org_id}/apiKeys/{key_id}`) and a private key
+   **once**, at creation time. Copy both immediately. The private key comes in one of two shapes
+   depending on what the CDP portal gave you -- `coinbase-balance-proxy` detects and handles
+   either, so paste it in exactly as shown, as-is:
+   - a bare base64 string with no `-----BEGIN-----` markers (Ed25519, the portal's current
+     default), or
+   - a PEM block starting `-----BEGIN EC PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`
+     (ECDSA/P-256, the legacy key type).
 4. Add two repo secrets (Settings -> Secrets and variables -> Actions -> Secrets) named
    `COINBASE_CDP_KEY_NAME` and `COINBASE_CDP_PRIVATE_KEY`, pasting the two values from step 3.
    Do this directly in GitHub's UI -- never paste an API key or private key into a chat with
