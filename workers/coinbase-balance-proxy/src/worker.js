@@ -199,6 +199,31 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === '/' || url.pathname === '/health') return json(200, { ok: true, name: 'coinbase-balance-proxy' });
+    if (url.pathname === '/api/debugbreakdown') {
+      // Temporary, read-only diagnostic: dumps every portfolio_balances field and position count,
+      // to find which figure matches what the Coinbase app itself shows as "balance." No secret
+      // material, only the account's own balance numbers. Remove once the right field is settled.
+      if (!env.COINBASE_CDP_KEY_NAME || !env.COINBASE_CDP_PRIVATE_KEY) return json(200, { payload: { ok: false, reason: 'not_configured' } });
+      try {
+        const list = await cbGet(env, '/api/v3/brokerage/portfolios');
+        const portfolios = Array.isArray(list.portfolios) ? list.portfolios.filter(function (p) { return !p.deleted; }) : [];
+        const out = [];
+        for (const p of portfolios) {
+          const detail = await cbGet(env, '/api/v3/brokerage/portfolios/' + encodeURIComponent(p.uuid));
+          const bd = detail.breakdown || {};
+          out.push({
+            portfolio: { name: p.name, type: p.type },
+            portfolio_balances: bd.portfolio_balances,
+            spot_positions_count: (bd.spot_positions || []).length,
+            perp_positions_count: (bd.perp_positions || []).length,
+            prediction_markets_positions: (bd.prediction_markets_positions || []).map(function (x) { return { product_type: x.product_type, side: x.side, notional_value: x.notional_value, cost_basis: x.cost_basis, unrealized_pnl: x.unrealized_pnl, current_price: x.current_price }; }),
+          });
+        }
+        return json(200, { payload: { ok: true, portfolios: out } });
+      } catch (e) {
+        return json(502, { payload: { ok: false, detail: String((e && e.message) || e) } });
+      }
+    }
     if (url.pathname !== '/api/accounts') return json(404, { error: 'not_found' });
 
     if (!env.COINBASE_CDP_KEY_NAME || !env.COINBASE_CDP_PRIVATE_KEY) {
