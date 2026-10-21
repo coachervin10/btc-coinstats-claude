@@ -203,6 +203,30 @@ decisions more evidence-based rather than just intuition-tuned:
   compares win rates, so "is some of my edge actually just two price sources disagreeing" has an
   actual answer instead of a hunch. Only bets placed after this was added carry the reading.
 
+## Model-accuracy improvements (settlement bias check, calibration-weighted model)
+
+Two more additions to `site/coinstats-btc.html`, this time aimed at the probability estimate
+itself rather than sizing or risk management:
+
+- **Settlement-bias diagnostic.** The existing price-adjustment system (the `adj` dollar offset,
+  auto-set from recent typed-or-Kalshi BRTI readings) already self-corrects live — that part was
+  already built. What's new: Indicator calibration's Kalshi-history section now reports whether
+  the *residual* bias after that adjustment is still statistically distinguishable from zero
+  (`khStat`'s new `se`/`significant` fields, a continuous-quantity version of the Wilson-interval
+  checks already used elsewhere on this page). If it's still significantly off, that's a sign the
+  flat-offset adjustment is hitting its own `ADJ_STEP_LIMIT`/`ADJ_MAX` guardrails rather than fully
+  absorbing the gap. This check is far more reliable with `kalshiOfficialOn` switched on, since
+  that's what gives it a reading from every close instead of only the ones you typed yourself.
+- **Calibration-weighted model (opt-in).** A new "weight each reading by its own proven record"
+  toggle in Indicator calibration (off by default) feeds that same card's own agree/disagree
+  verdicts back into `computeMomentumRaw()` live: a reading shown "predictive" (significant, beyond
+  sampling noise) votes at 1.5x, one shown "inverted" votes at 0x (zeroed, not flipped — inversions
+  are a weaker, less stable thing to act on than just not counting a reading), and anything without
+  enough settled bets yet is unchanged. Previously every reading counted equally regardless of its
+  own track record. Off by default, and deliberately separate from `calibShrinkOn` (which only
+  affects Kelly sizing) — this one changes the probability estimate itself, which is why it stays
+  opt-in until the calibration table has enough data to actually trust.
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run

@@ -699,6 +699,7 @@ body.view-simple .adv{ display:none !important; }
           <thead><tr><th>Indicator</th><th>Agree (n, win%)</th><th>Disagree (n, win%)</th><th>Read</th></tr></thead>
           <tbody id="calibBody"></tbody>
         </table>
+        <label class="row" style="margin-top:10px;"><input type="checkbox" id="calibWeightOn"><span>weight each reading above by its own proven record in the live model itself &mdash; 1.5&times; the vote for anything shown &ldquo;predictive,&rdquo; 0&times; (not flipped) for anything shown &ldquo;inverted,&rdquo; unchanged for anything without enough data yet. Off by default: a bigger, more structural change than anything else on this card, worth turning on only once you've looked at the table above and trust what it's saying.</span></label>
         <div class="note" style="margin-top:14px; padding-top:14px;">
           <strong>Probability calibration</strong> &mdash; a different question from the indicator table above: when the model itself
           says, say, 80% at entry, does that side actually win about 80% of the time? Bucketed by the stated probability at entry.
@@ -1839,7 +1840,15 @@ function khMerge(windows){
 function khStat(diffs){
   if (!diffs.length) return null;
   var n = diffs.length, abs = diffs.map(Math.abs).sort(function(a, b){ return a - b; });
-  return {n:n, mean:diffs.reduce(function(a, b){ return a + b; }, 0) / n, meanAbs:abs.reduce(function(a, b){ return a + b; }, 0) / n, medianAbs:abs[Math.floor(n / 2)], maxAbs:abs[n - 1]};
+  var mean = diffs.reduce(function(a, b){ return a + b; }, 0) / n;
+  /* signed bias, with its own standard error, so "leaning high by $X" can be told apart from "within sampling
+     noise of zero" -- the same spirit as the Wilson/stratified checks elsewhere on this page, just for a
+     continuous quantity (a dollar gap) instead of a win rate. Needs n >= 2 for a variance; a single reading
+     gets no significance claim either way. */
+  var variance = n > 1 ? diffs.reduce(function(a, x){ return a + (x - mean) * (x - mean); }, 0) / (n - 1) : null;
+  var se = variance != null ? Math.sqrt(variance / n) : null;
+  return {n:n, mean:mean, meanAbs:abs.reduce(function(a, b){ return a + b; }, 0) / n, medianAbs:abs[Math.floor(n / 2)], maxAbs:abs[n - 1],
+          se:se, significant:se != null && se > 0 ? Math.abs(mean) > 1.96 * se : null};
 }
 /* hist: newest-first windows; bets: the paper ledger; wh: window history records [t, price incl. adjustment, raw price, sigma, source, brti] */
 function computeOfficialStats(hist, bets, wh){
@@ -1927,7 +1936,25 @@ function renderKh(){
   lines.push(st.withValue + ' of ' + loaded + ' windows carry an official value.');
   if (st.typed) lines.push('Your typed BRTI vs official, ' + st.typed.n + ' closes: off by ' + money0(st.typed.meanAbs) + ' on average (typically ' + money0(st.typed.medianAbs) + ', at most ' + money0(st.typed.maxAbs) + '), leaning ' + (st.typed.mean >= 0 ? 'high' : 'low') + ' by ' + money0(Math.abs(st.typed.mean)) + '.');
   else lines.push('None of your typed BRTI values fall in these windows yet.');
-  if (st.pageRaw) lines.push('This page\u2019s price at the close vs official, ' + st.pageRaw.n + ' closes: off by ' + money0(st.pageRaw.meanAbs) + ' on average before your adjustment, ' + money0(st.pageAdj.meanAbs) + ' with it.');
+  if (st.pageRaw){
+    lines.push('This page\u2019s price at the close vs official, ' + st.pageRaw.n + ' closes: off by ' + money0(st.pageRaw.meanAbs) + ' on average before your adjustment, ' + money0(st.pageAdj.meanAbs) + ' with it.');
+    /* The adjustment is a median-following corrector -- if it's doing its job, this signed residual should sit
+       near zero with a tight range. A residual that's still significantly nonzero after the adjustment means
+       something is leaning past what a flat dollar offset can fix: most likely ADJ_STEP_LIMIT/ADJ_MAX damping
+       a correction that wants to go further, or a bias that isn't actually constant (so a single fixed number
+       can't fully remove it). Needs kalshiOfficialOn on to get enough closes to say anything here reliably --
+       otherwise this only reflects whatever closes you happened to type a BRTI for yourself. */
+    if (st.pageAdj.n >= 15 && st.pageAdj.se != null){
+      var adjCi = '\u00b1$' + (1.96 * st.pageAdj.se).toFixed(2);
+      if (st.pageAdj.significant){
+        lines.push('After the adjustment, this page is still leaning ' + (st.pageAdj.mean >= 0 ? 'high' : 'low') + ' by ' + money0(Math.abs(st.pageAdj.mean)) + ' (95% range ' + adjCi + '), beyond sampling noise \u2014 the adjustment isn\u2019t fully absorbing this; check whether it\u2019s pinned at its own \u00b1$' + ADJ_MAX + ' limit.');
+      } else {
+        lines.push('After the adjustment, the remaining bias (' + sgn(st.pageAdj.mean) + ', 95% range ' + adjCi + ') is within sampling noise \u2014 the adjustment looks like it\u2019s doing its job.');
+      }
+    } else if (!$('kalshiOfficialOn').checked) {
+      lines.push('Turn on \u201cuse Kalshi\u2019s official value as the BRTI\u201d below to get enough closes here to say this reliably, instead of only the ones you happened to type yourself.');
+    }
+  }
   if (st.nextTarget) lines.push('Each window\u2019s target vs the previous window\u2019s official value: identical in ' + st.nextTarget.equal + ' of ' + st.nextTarget.n + ' (average gap ' + money0(st.nextTarget.stat.meanAbs) + ').');
   if (kh.applied) lines.push(kh.applied + ' close' + (kh.applied === 1 ? '' : 's') + ' took Kalshi\u2019s value in place of a typed BRTI.');
   if (kh.skipped.length) lines.push('Skipped as implausible: ' + kh.skipped.join('; ') + '.');
@@ -2216,90 +2243,106 @@ function computeMomentum(){                      // the open bets and the displa
   momMemo = {t:now, v:v};
   return v;
 }
+/* wl(name, lean): the raw lean, unless the "weight by calibration" toggle is on, in which case it's scaled by
+   calibWeightFor(name) -- 1.5x for a reading proven predictive at similar price leads, 0x for one proven inverted,
+   1x (unchanged) for anything without enough settled bets to judge yet. Only ever used for the GROUP averages that
+   feed the composite; items.push() below always keeps the raw lean, since the calibration table itself is built
+   from those raw values -- weighting what calibration reads from would be circular. */
+function wl(name, lean){ return ($('calibWeightOn') && $('calibWeightOn').checked) ? lean * calibWeightFor(name) : lean; }
 function computeMomentumRaw(){
   if (!series5 || !vol || series5.length < 30) return null;
   var closes = series5.map(function(x){ return x.p; });
   /* only CoinStats' own chart prices are used for the candle-based readings, so two different price sources are never joined */
   var n = closes.length, last = closes[n - 1], items = [], factors = [], osc = [], trend = [];
   var r = rsi(closes.slice(-100), 14);
-  if (r != null){ var l1 = clamp((r - 50) / 35, -1, 1); items.push({name:'RSI(14), 5-min bars', src:'CoinStats', val:r.toFixed(0), lean:l1}); osc.push(l1); }
+  if (r != null){ var l1 = clamp((r - 50) / 35, -1, 1); items.push({name:'RSI(14), 5-min bars', src:'CoinStats', val:r.toFixed(0), lean:l1}); osc.push(wl('RSI(14), 5-min bars', l1)); }
   var bi = computeBarIndicators();
   var barSrc = bi && bi.real ? 'Crypto.com, 15m' : 'CoinStats (approx.)';
   if (bi){
     items.push({name:'Stochastic %K/%D, 15-min bars', src:barSrc, val:bi.stochK.toFixed(0) + ' / ' + bi.stochD.toFixed(0), lean:bi.stochLean});
     items.push({name:'Awesome Oscillator, 15-min bars', src:barSrc, val:(bi.ao >= 0 ? '+' : '\u2212') + '$' + Math.abs(bi.ao).toFixed(1), lean:bi.aoLean});
     items.push({name:'Accelerator Oscillator, 15-min bars', src:barSrc, val:(bi.ac >= 0 ? '+' : '\u2212') + '$' + Math.abs(bi.ac).toFixed(1), lean:bi.acLean});
-    osc.push(bi.stochLean, bi.aoLean, bi.acLean);
+    osc.push(wl('Stochastic %K/%D, 15-min bars', bi.stochLean), wl('Awesome Oscillator, 15-min bars', bi.aoLean), wl('Accelerator Oscillator, 15-min bars', bi.acLean));
   }
   var e9 = ema(closes, 9), e21 = ema(closes, 21), d = (e9[n - 1] - e21[n - 1]) / e21[n - 1], l2 = clamp(d / (2 * vol.slow), -1, 1);
-  items.push({name:'EMA 9 vs 21, 5-min bars', src:'CoinStats', val:signedPct(d, 3) + '%', lean:l2}); trend.push(l2);
+  items.push({name:'EMA 9 vs 21, 5-min bars', src:'CoinStats', val:signedPct(d, 3) + '%', lean:l2}); trend.push(wl('EMA 9 vs 21, 5-min bars', l2));
   var c30 = ($('useCdc').checked && cdc.candles30 && cdc.candles30.length >= 2) ? cdc.candles30 : null;
   var r30 = c30 ? Math.log(c30[c30.length - 1].close / c30[c30.length - 2].close) : Math.log(last / closes[Math.max(0, n - 7)]);
   var l3 = clamp(r30 / (2 * vol.slow * Math.sqrt(6)), -1, 1);
-  items.push({name:'Change, last 30 min', src:c30 ? 'Crypto.com, 30m' : 'CoinStats (approx.)', val:signedPct(r30, 2) + '%', lean:l3}); trend.push(l3);
+  var n30name = 'Change, last 30 min';
+  items.push({name:n30name, src:c30 ? 'Crypto.com, 30m' : 'CoinStats (approx.)', val:signedPct(r30, 2) + '%', lean:l3}); trend.push(wl(n30name, l3));
   if (osc.length) factors.push(osc.reduce(function(a, x){ return a + x; }, 0) / osc.length);      // RSI, Stochastic, Awesome and Accelerator count once
   factors.push(trend.reduce(function(a, x){ return a + x; }, 0) / trend.length);                     // the two trend readings count once
   if (bi){
-    items.push({name:'Bollinger position, 15-min bars', src:'CoinStats', val:(bi.bollPos >= 0 ? '+' : '\u2212') + Math.abs(bi.bollPos).toFixed(2) + '\u03c3 from mid', lean:bi.bollLean});
-    items.push({name:'Prior 3 candles, 15-min bars', src:'CoinStats', val:bi.priorGreens + '/3 green, avg ' + signedPct(bi.priorAvg, 2) + '%', lean:bi.priorLean});
-    factors.push(bi.bollLean); factors.push(bi.priorLean);
+    var bollName = 'Bollinger position, 15-min bars', priorName = 'Prior 3 candles, 15-min bars';
+    items.push({name:bollName, src:'CoinStats', val:(bi.bollPos >= 0 ? '+' : '\u2212') + Math.abs(bi.bollPos).toFixed(2) + '\u03c3 from mid', lean:bi.bollLean});
+    items.push({name:priorName, src:'CoinStats', val:bi.priorGreens + '/3 green, avg ' + signedPct(bi.priorAvg, 2) + '%', lean:bi.priorLean});
+    factors.push(wl(bollName, bi.bollLean)); factors.push(wl(priorName, bi.priorLean));
   }
   var r2 = liveChange(120);
   if (r2 != null){
-    var l4 = clamp(r2 / (vol.perSec * Math.sqrt(120)) / 2, -1, 1);
-    items.push({name:'Change, last 2 min (live)', src:'this page', val:signedPct(r2, 3) + '%', lean:l4});
-    factors.push(l4);
+    var l4 = clamp(r2 / (vol.perSec * Math.sqrt(120)) / 2, -1, 1), n2name = 'Change, last 2 min (live)';
+    items.push({name:n2name, src:'this page', val:signedPct(r2, 3) + '%', lean:l4});
+    factors.push(wl(n2name, l4));
   }
   if ($('useCdc').checked && cdc.candles1 && cdc.candles1.length >= 25){
     var c1cl = cdc.candles1.map(function(c){ return c.close; }), n1 = c1cl.length - 1;
     var e9a = ema(c1cl, 9), e21a = ema(c1cl, 21), d1 = (e9a[n1] - e21a[n1]) / e21a[n1];
-    var l5 = clamp(d1 / (2 * vol.slow / Math.sqrt(5)), -1, 1);
-    items.push({name:'EMA 9 vs 21, 1-min bars', src:'Crypto.com, 1m', val:signedPct(d1, 3) + '%', lean:l5});
-    factors.push(l5);
+    var l5 = clamp(d1 / (2 * vol.slow / Math.sqrt(5)), -1, 1), n1name = 'EMA 9 vs 21, 1-min bars';
+    items.push({name:n1name, src:'Crypto.com, 1m', val:signedPct(d1, 3) + '%', lean:l5});
+    factors.push(wl(n1name, l5));
   }
   var sig = cdcSignals();
   if (sig){
-    items.push({name:'Order book (\u00b10.5%)', src:'Crypto.com', val:'bid ' + sig.bidV.toFixed(1) + ' / ask ' + sig.askV.toFixed(1), lean:sig.obLean});
-    items.push({name:'Taker flow (60s)', src:'Crypto.com', val:'buy ' + sig.buy.toFixed(3) + ' / sell ' + sig.sell.toFixed(3), lean:sig.flowLean});
-    factors.push((sig.obLean + sig.flowLean) / 2);                                    // book and flow count as one vote
+    var obName = 'Order book (\u00b10.5%)', flowName = 'Taker flow (60s)';
+    items.push({name:obName, src:'Crypto.com', val:'bid ' + sig.bidV.toFixed(1) + ' / ask ' + sig.askV.toFixed(1), lean:sig.obLean});
+    items.push({name:flowName, src:'Crypto.com', val:'buy ' + sig.buy.toFixed(3) + ' / sell ' + sig.sell.toFixed(3), lean:sig.flowLean});
+    factors.push((wl(obName, sig.obLean) + wl(flowName, sig.flowLean)) / 2);                                    // book and flow count as one vote
     var volLeans = [];
     if (sig.volRatio != null){
-      items.push({name:'Volume vs 20-bar average, 5-min bars', src:'Crypto.com', val:sig.volRatio.toFixed(2) + '\u00d7' + (sig.volRatio > 3 ? ' (spike)' : ''), lean:sig.volLean});
-      volLeans.push(sig.volLean);
+      var volName = 'Volume vs 20-bar average, 5-min bars';
+      items.push({name:volName, src:'Crypto.com', val:sig.volRatio.toFixed(2) + '\u00d7' + (sig.volRatio > 3 ? ' (spike)' : ''), lean:sig.volLean});
+      volLeans.push(wl(volName, sig.volLean));
     }
     if (sig.vol15Ratio != null){
-      items.push({name:'Volume vs 20-bar average, 15-min bars', src:'Crypto.com', val:sig.vol15Ratio.toFixed(2) + '\u00d7' + (sig.vol15Ratio > 3 ? ' (spike)' : ''), lean:sig.vol15Lean});
-      volLeans.push(sig.vol15Lean);
+      var vol15Name = 'Volume vs 20-bar average, 15-min bars';
+      items.push({name:vol15Name, src:'Crypto.com', val:sig.vol15Ratio.toFixed(2) + '\u00d7' + (sig.vol15Ratio > 3 ? ' (spike)' : ''), lean:sig.vol15Lean});
+      volLeans.push(wl(vol15Name, sig.vol15Lean));
     }
     if (sig.obvShare != null){
-      items.push({name:'Signed volume, last hour', src:'Crypto.com', val:'net ' + (sig.obvShare >= 0 ? '+' : '\u2212') + Math.abs(sig.obvShare * 100).toFixed(0) + '% of volume', lean:sig.obvLean});
-      volLeans.push(sig.obvLean);
+      var obvName = 'Signed volume, last hour';
+      items.push({name:obvName, src:'Crypto.com', val:'net ' + (sig.obvShare >= 0 ? '+' : '\u2212') + Math.abs(sig.obvShare * 100).toFixed(0) + '% of volume', lean:sig.obvLean});
+      volLeans.push(wl(obvName, sig.obvLean));
     }
     var cvdSig = cvdSignal();
     if (cvdSig){
-      items.push({name:'CVD, this window', src:'Crypto.com', val:'net ' + (cvdSig.lean >= 0 ? '+' : '\u2212') + Math.abs(cvdSig.lean * 100).toFixed(0) + '% of ' + cvdSig.total.toFixed(2) + ' BTC traded', lean:cvdSig.lean});
-      volLeans.push(cvdSig.lean);
+      var cvdName = 'CVD, this window';
+      items.push({name:cvdName, src:'Crypto.com', val:'net ' + (cvdSig.lean >= 0 ? '+' : '\u2212') + Math.abs(cvdSig.lean * 100).toFixed(0) + '% of ' + cvdSig.total.toFixed(2) + ' BTC traded', lean:cvdSig.lean});
+      volLeans.push(wl(cvdName, cvdSig.lean));
     }
     if (sig.oiChangePct != null){
-      items.push({name:'Open interest, 5 min', src:'Crypto.com', val:(sig.oiChangePct >= 0 ? '+' : '\u2212') + Math.abs(sig.oiChangePct * 100).toFixed(2) + '% (' + sig.oi.toFixed(1) + ' BTC now)', lean:sig.oiLean});
-      volLeans.push(sig.oiLean);
+      var oiName = 'Open interest, 5 min';
+      items.push({name:oiName, src:'Crypto.com', val:(sig.oiChangePct >= 0 ? '+' : '\u2212') + Math.abs(sig.oiChangePct * 100).toFixed(2) + '% (' + sig.oi.toFixed(1) + ' BTC now)', lean:sig.oiLean});
+      volLeans.push(wl(oiName, sig.oiLean));
     }
     if (volLeans.length) factors.push(volLeans.reduce(function(a, x){ return a + x; }, 0) / volLeans.length);   // all the volume/flow readings (ratio, signed-volume, CVD, open interest) count once together
     if (sig.vwapDev != null){
-      items.push({name:'Price vs 60-min VWAP', src:'Crypto.com', val:signedPct(sig.vwapDev, 3) + '% (VWAP ' + fmt(sig.vwap) + ')', lean:sig.vwapLean});
-      factors.push(sig.vwapLean);
+      var vwapName = 'Price vs 60-min VWAP';
+      items.push({name:vwapName, src:'Crypto.com', val:signedPct(sig.vwapDev, 3) + '% (VWAP ' + fmt(sig.vwap) + ')', lean:sig.vwapLean});
+      factors.push(wl(vwapName, sig.vwapLean));
     }
     if (sig.fundingRate != null){
-      items.push({name:'Funding rate (crowding)', src:'Crypto.com', val:(sig.fundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.fundingRate) * 100).toFixed(4) + '%' + (sig.estFundingRate != null ? ', next est. ' + (sig.estFundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.estFundingRate) * 100).toFixed(4) + '%' : ''), lean:sig.fundingLean});
-      factors.push(sig.fundingLean);                                                    // its own vote -- a crowding/reversion read, not a trend one
+      var fundName = 'Funding rate (crowding)';
+      items.push({name:fundName, src:'Crypto.com', val:(sig.fundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.fundingRate) * 100).toFixed(4) + '%' + (sig.estFundingRate != null ? ', next est. ' + (sig.estFundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.estFundingRate) * 100).toFixed(4) + '%' : ''), lean:sig.fundingLean});
+      factors.push(wl(fundName, sig.fundingLean));                                                    // its own vote -- a crowding/reversion read, not a trend one
     }
   }
   if ($('useCdc').checked && cdc.basis && Date.now() - cdc.basis.at <= 45000){
     var bps = (cdc.basis.mark - cdc.basis.index) / cdc.basis.index * 10000;
     var avgAbs = basisHist.length ? basisHist.reduce(function(a, x){ return a + x; }, 0) / basisHist.length : 5;
-    var bl = clamp(bps / (Math.max(avgAbs, 2) * 2), -1, 1);
-    items.push({name:'Mark/index basis', src:'Crypto.com', val:(bps >= 0 ? '+' : '\u2212') + Math.abs(bps).toFixed(1) + 'bps (recent avg ' + avgAbs.toFixed(1) + ')', lean:bl});
-    factors.push(bl);
+    var bl = clamp(bps / (Math.max(avgAbs, 2) * 2), -1, 1), basisName = 'Mark/index basis';
+    items.push({name:basisName, src:'Crypto.com', val:(bps >= 0 ? '+' : '\u2212') + Math.abs(bps).toFixed(1) + 'bps (recent avg ' + avgAbs.toFixed(1) + ')', lean:bl});
+    factors.push(wl(basisName, bl));
   }
   var comp = factors.reduce(function(a, x){ return a + x; }, 0) / factors.length;
   return {items:items, composite:comp, factors:factors.length, votes:factors.slice(), spike:!!(sig && sig.spike), sig:sig};
@@ -2851,8 +2894,12 @@ function setBrti(bet, value, opts){
   renderLedger(); tick();
 }
 /* ---------- indicator calibration: how has each saved reading actually done in your own history? ----------
-   On-demand only (the button below), not run every tick -- it's a look back at settled bets, not a live gate.
-   Purely informational: it never changes the live model's weights on its own. */
+   The table itself is still a look back at settled bets, refreshed by the button below, not something recomputed
+   from scratch on a live timer. Informational by default -- rows here never change anything on their own. The one
+   exception is the opt-in "weight by calibration" toggle in the entry-rules card: when it's on, wl()/calibWeightFor()
+   above read these same verdicts live, every tick, to scale each reading's vote in the odds model itself. Off by
+   default -- this is a bigger, more structural change than anything else calibration does, so it stays opt-in until
+   you've actually looked at the table and trust what it's saying. */
 /* ---------- sampling uncertainty ----------
    A hit rate from a small sample is a rough measurement, not a fact. wilsonInterval gives the range a true
    rate could plausibly sit in (95%), and compareRates tests whether two hit rates differ by more than that
@@ -2893,8 +2940,14 @@ function leadBand(b){
   return z < 0.25 ? 0 : (z < 0.5 ? 1 : 2);
 }
 function pctRange(iv){ return iv ? Math.round(iv.lo * 100) + '\u2013' + Math.round(iv.hi * 100) + '%' : ''; }
+/* Memoized by settled-bet count + the newest one's id, since this used to be on-demand only (the button below) but
+   wl()/calibWeightFor() above may now call it every tick once "weight by calibration" is on -- cheap to call
+   repeatedly, only actually recomputes when a new bet has settled. */
+var calibMemo = null;
 function runCalibration(){
   var bets = paper.bets.filter(function(b){ return b.status === 'settled' && b.won !== null && b.fx && b.fx.length; });
+  var key = bets.length + ':' + (bets.length ? bets[bets.length - 1].id : 0);
+  if (calibMemo && calibMemo.key === key) return calibMemo.val;
   var byName = {};
   bets.forEach(function(b){
     var seen = {};
@@ -2921,7 +2974,21 @@ function runCalibration(){
     }
     return {name:name, agreeN:g.agreeN, agreeRate:agreeRate, agreeCI:wilsonInterval(g.agreeWin, g.agreeN), disagreeN:g.disagreeN, disagreeRate:disagreeRate, disagreeCI:wilsonInterval(g.disagreeWin, g.disagreeN), read:read, verdict:verdict, total:g.agreeN + g.disagreeN};
   }).sort(function(a, b){ return b.total - a.total; });
-  return {bets:bets.length, rows:rows};
+  var val = {bets:bets.length, rows:rows};
+  calibMemo = {key:key, val:val};
+  return val;
+}
+/* The only thing that actually changes the live model when "weight by calibration" is on: looks up this reading's
+   own proven record (same table as the card below) and scales its vote accordingly -- boosted if proven predictive,
+   zeroed (not flipped: an inversion is a weaker, less stable thing to act on than simply not counting it) if proven
+   inverted, unchanged with too little data either way to judge. */
+var CALIB_BOOST = 1.5;
+function calibWeightFor(name){
+  var row = runCalibration().rows.filter(function(x){ return x.name === name; })[0];
+  if (!row) return 1;
+  if (row.verdict === 'earns') return CALIB_BOOST;
+  if (row.verdict === 'hurts') return 0;
+  return 1;
 }
 function renderCalibration(){
   var r = runCalibration();
@@ -4824,6 +4891,8 @@ $('importBtn').addEventListener('click', doImport);
 $('calibRun').addEventListener('click', function(){ renderCalibration(); renderProbCalibration(); renderDivergenceCheck(); renderDrift(); });
 $('calibShrinkOn').checked = get('cs_calib_shrink_on_v1', '1') === '1';
 $('calibShrinkOn').addEventListener('change', function(){ put('cs_calib_shrink_on_v1', $('calibShrinkOn').checked ? '1' : '0'); probCalibMemo = null; tick(); });
+$('calibWeightOn').checked = get('cs_calib_weight_on_v1', '0') === '1';
+$('calibWeightOn').addEventListener('change', function(){ put('cs_calib_weight_on_v1', $('calibWeightOn').checked ? '1' : '0'); momMemo = null; calibMemo = null; tick(); });
 $('autoPauseStreak').value = get('cs_auto_pause_streak_v1', '6');
 $('autoPauseStreak').addEventListener('change', function(){ put('cs_auto_pause_streak_v1', $('autoPauseStreak').value); });
 $('driftRecentN').value = get('cs_drift_n_v1', '30');
