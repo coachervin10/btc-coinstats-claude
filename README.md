@@ -4,7 +4,7 @@ This is a standalone rebuild of a BTC/USD paper-trading tracker that originally 
 Claude artifact (reading CoinStats, Crypto.com, Alpha Vantage and Kalshi through Claude's own
 MCP connectors). It now runs as:
 
-- seven small **Cloudflare Workers** (`workers/*`) that each proxy one or more upstream data
+- eight small **Cloudflare Workers** (`workers/*`) that each proxy one or more upstream data
   sources, reshaping responses so the page's existing parsing code didn't need to change
 - one **static page** (`site/coinstats-btc.html`) that calls those Workers directly with
   `fetch()` — no Claude account, connector, or artifact needed to use it
@@ -265,6 +265,34 @@ the option it came from, converted to the same "per 5 minutes" scale used elsewh
 degrades silently to nothing shown if Deribit's options data doesn't parse (e.g. no live option at
 least 20 hours from expiry).
 
+## Real Coinbase account balances (read-only, optional)
+
+A new `coinbase-balance-proxy` Worker shows your actual Coinbase account balances next to the
+paper account, purely for reference -- it is architecturally incapable of placing an order or
+moving funds. It only ever calls Coinbase's `GET /accounts` endpoint, nothing else, so there is no
+code path in this Worker that could trade or withdraw even if you wanted it to.
+
+**Setup (optional -- everything else on this page works without it):**
+
+1. Go to <https://www.coinbase.com/settings/api> and create a new API key.
+2. Check **only** the **View** permission. Leave **Trade**, **Transfer**, and **Receive**
+   unchecked -- this is what actually makes the key incapable of trading or withdrawing, enforced
+   by Coinbase itself, independent of anything this repo's code does.
+3. Coinbase shows you a key name (`organizations/{org_id}/apiKeys/{key_id}`) and a PEM-formatted
+   private key **once**, at creation time. Copy both immediately.
+4. Add two repo secrets (Settings -> Secrets and variables -> Actions -> Secrets) named
+   `COINBASE_CDP_KEY_NAME` and `COINBASE_CDP_PRIVATE_KEY`, pasting the two values from step 3.
+   Do this directly in GitHub's UI -- never paste an API key or private key into a chat with
+   Claude or anyone else.
+5. Push to `main` (or re-run the workflow) so the new `deploy-coinbase-balance-proxy` job picks up
+   the secrets.
+6. On the page, check "show my real Coinbase account balances here" in the new "Coinbase account
+   (read-only)" card.
+
+Until you do this, the Worker deploys fine and the card just says "Not set up yet" -- nothing
+breaks, nothing is required. The balances shown are read-only and refresh every 60 seconds; they
+are never read by any sizing, odds, or auto-trading logic elsewhere on the page.
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run
@@ -307,8 +335,9 @@ workers/
   paper-store/         D1-backed cross-device paper-trading persistence
   refprice-proxy/      Coinbase/Kraken/Bitstamp/Gemini/Bullish/itBit volume-weighted reference price (no key needed)
   deribit-iv-proxy/    Deribit near-the-money BTC option implied vol, forward-looking (no key needed)
+  coinbase-balance-proxy/  read-only real Coinbase account balances (optional, needs COINBASE_CDP_KEY_NAME + COINBASE_CDP_PRIVATE_KEY)
 site/
   coinstats-btc.html   the standalone page; publish target for Cloudflare Pages
 .github/workflows/
-  deploy.yml           deploys all seven Workers + the page on push to main
+  deploy.yml           deploys all eight Workers + the page on push to main
 ```

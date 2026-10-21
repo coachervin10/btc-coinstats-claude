@@ -426,6 +426,12 @@ body.view-simple .adv{ display:none !important; }
       </div>
 
       <div class="card">
+        <h2>Coinbase account (read-only)</h2>
+        <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="useCoinbaseAcct"><span>show my real Coinbase account balances here, for reference only &mdash; this page can never place an order or move funds, no matter what permissions the API key has. Give the key only the &ldquo;View&rdquo; permission in Coinbase's own key-creation screen (leave Trade, Transfer and Receive unchecked) and it becomes physically incapable of trading or withdrawing, independent of this page's code. Off by default.</span></label>
+        <div id="coinbaseAcctBody" class="prob-meta">Off.</div>
+      </div>
+
+      <div class="card">
         <h2>Auto-trading</h2>
         <label class="row"><input type="checkbox" id="autoOn"><span>place bets automatically when the signal is strong enough</span></label>
         <div class="prob-meta" id="autoStatus" role="status">Auto-trading is off.</div>
@@ -979,6 +985,7 @@ var API_BASE = {
   paperstore: 'https://paper-store.__CF_SUBDOMAIN__.workers.dev',
   refprice: 'https://refprice-proxy.__CF_SUBDOMAIN__.workers.dev',
   deribit: 'https://deribit-iv-proxy.__CF_SUBDOMAIN__.workers.dev',
+  coinbaseAcct: 'https://coinbase-balance-proxy.__CF_SUBDOMAIN__.workers.dev',
 };
 var serverName = 'coinstats';
 /**
@@ -1020,6 +1027,10 @@ async function callApi(server, tool, input){
     base = API_BASE.deribit;
     if (tool === 'get-iv') path = '/api/iv';
     else throw {code:'bad_shape', message:'deribit-iv-proxy has no route for ' + tool};
+  } else if (server === 'coinbaseAcct'){
+    base = API_BASE.coinbaseAcct;
+    if (tool === 'get-accounts') path = '/api/accounts';
+    else throw {code:'bad_shape', message:'coinbase-balance-proxy has no route for ' + tool};
   } else {
     throw {code:'bad_shape', message:'no proxy configured for server ' + server};
   }
@@ -1833,6 +1844,50 @@ function deribitIvPer5(){
   var annualPct = deribitIv.data.mark_iv;         // already a percent, e.g. 55 for 55%
   var per5 = (annualPct / 100) * Math.sqrt(5 / (365 * 24 * 60));
   return {per5pct:per5 * 100, days:deribitIv.data.days_to_expiry, annualPct:annualPct};
+}
+/* Read-only view of your real Coinbase account balances, via coinbase-balance-proxy. This never
+   feeds the model or places any order -- it's a reference card only, so you can see your actual
+   holdings next to the paper account without leaving the page. Off by default (no secrets means
+   no account to show), and degrades to a quiet "not set up" message rather than an error if the
+   Worker's two secrets haven't been configured yet -- see that Worker's wrangler.toml. */
+var coinbaseAcct = {data:null, busy:false, fails:0, recvAt:0, notConfigured:false, error:null};
+var COINBASE_ACCT_EVERY_MS = 60000;
+async function coinbaseAcctPoll(){
+  if (sessionClosed || coinbaseAcct.busy || document.hidden || !$('useCoinbaseAcct').checked) return;
+  if (coinbaseAcct.data && Date.now() - coinbaseAcct.recvAt < COINBASE_ACCT_EVERY_MS) return;
+  coinbaseAcct.busy = true;
+  try {
+    var res = await callApi('coinbaseAcct', 'get-accounts', {});
+    var d = res && res.payload;
+    if (d && d.ok && Array.isArray(d.accounts)){
+      coinbaseAcct.data = d.accounts; coinbaseAcct.recvAt = Date.now(); coinbaseAcct.fails = 0;
+      coinbaseAcct.notConfigured = false; coinbaseAcct.error = null;
+    } else if (d && d.reason === 'not_configured'){
+      coinbaseAcct.notConfigured = true; coinbaseAcct.error = null;
+    } else {
+      coinbaseAcct.error = (d && d.detail) || 'Coinbase did not return a usable account list.';
+    }
+  } catch (e) {
+    coinbaseAcct.fails++;
+    coinbaseAcct.error = (e && e.message) || String(e);
+  } finally {
+    coinbaseAcct.busy = false;
+    tick();
+  }
+}
+function renderCoinbaseAcct(){
+  var el = $('coinbaseAcctBody');
+  if (!el) return;
+  if (!$('useCoinbaseAcct').checked){ el.textContent = 'Off.'; return; }
+  if (coinbaseAcct.notConfigured){ el.textContent = 'Not set up yet — add the two API-key secrets to coinbase-balance-proxy (see README) to show your real balances here.'; return; }
+  if (coinbaseAcct.error && !coinbaseAcct.data){ el.textContent = 'Could not reach Coinbase: ' + coinbaseAcct.error; return; }
+  if (!coinbaseAcct.data){ el.textContent = 'Loading…'; return; }
+  if (!coinbaseAcct.data.length){ el.textContent = 'Connected — no nonzero balances on this account.'; return; }
+  el.innerHTML = coinbaseAcct.data.map(function(a){
+    var amt = a.available != null ? a.available : 0, hold = a.hold || 0;
+    return '<div class="row" style="justify-content:space-between;"><span>' + a.currency + '</span><span>' +
+      amt.toLocaleString(undefined, {maximumFractionDigits:8}) + (hold ? ' (+' + hold.toLocaleString(undefined, {maximumFractionDigits:8}) + ' held)' : '') + '</span></div>';
+  }).join('');
 }
 /* Volume trend over the last ~60s: how much total cross-exchange 24h volume rose (or fell) since
    the oldest sample still within that window. A rising total means fresh trading activity is
@@ -3723,6 +3778,7 @@ function tick(){
   try { shadowCheckCap(); renderShadow(); } catch (e) { /* rehearsal feature only -- never let it break the main tick */ }
   try { renderKellyPreview(); } catch (e) { /* display only -- never let it break the main tick */ }
   try { renderEthBtc(); } catch (e) { /* display only -- never let it break the main tick */ }
+  try { renderCoinbaseAcct(); } catch (e) { /* display only -- never let it break the main tick */ }
   recordWindow();
   autoCloseCheck();
   $('trendNote').textContent = trendNoteText();
@@ -4855,6 +4911,8 @@ $('useDeribitIv').checked = get('cs_use_deribit_iv_v1', '1') !== '0';
 $('useDeribitIv').addEventListener('change', function(){ put('cs_use_deribit_iv_v1', $('useDeribitIv').checked ? '1' : '0'); if ($('useDeribitIv').checked) deribitPoll(); else { deribitIv.data = null; } tick(); });
 $('useEthBtc').checked = get('cs_use_ethbtc_v1', '0') === '1';
 $('useEthBtc').addEventListener('change', function(){ put('cs_use_ethbtc_v1', $('useEthBtc').checked ? '1' : '0'); if ($('useEthBtc').checked) ethBtcPoll(); else { ethBtc.candles5 = null; ethBtc.msg = ''; } renderEthBtc(); tick(); });
+$('useCoinbaseAcct').checked = get('cs_use_coinbase_acct_v1', '0') === '1';
+$('useCoinbaseAcct').addEventListener('change', function(){ put('cs_use_coinbase_acct_v1', $('useCoinbaseAcct').checked ? '1' : '0'); if ($('useCoinbaseAcct').checked) coinbaseAcctPoll(); else { coinbaseAcct.data = null; coinbaseAcct.error = null; } renderCoinbaseAcct(); });
 $('strike').addEventListener('input', onStrikeInput);
 $('stake').addEventListener('input', function(){ put(K.stake, $('stake').value); });
 $('period').addEventListener('change', function(){ put(K.period, $('period').value); tick(); });
@@ -5082,6 +5140,7 @@ setInterval(tick, 1000);
 setInterval(cdcPoll, CDC_EVERY_MS);
 setInterval(ethBtcPoll, CDC_EVERY_MS);
 setInterval(deribitPoll, CDC_EVERY_MS);
+setInterval(coinbaseAcctPoll, CDC_EVERY_MS);
 setInterval(newsPoll, NEWS_EVERY_MS);
 setInterval(avPricePoll, AV_PRICE_EVERY_MS);
 setInterval(kalshiPoll, 1000);
@@ -5094,6 +5153,8 @@ setInterval(tapePoll, 3000);
 cdcPoll();
 ethBtcPoll();
 deribitPoll();
+coinbaseAcctPoll();
+renderCoinbaseAcct();
 if ($('live').checked && !sessionClosed){ start(); refreshChart(); }
 })();
 </script>

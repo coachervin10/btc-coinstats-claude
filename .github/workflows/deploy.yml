@@ -132,6 +132,26 @@ jobs:
           workingDirectory: workers/deribit-iv-proxy
           command: deploy
 
+  deploy-coinbase-balance-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # COINBASE_CDP_KEY_NAME / COINBASE_CDP_PRIVATE_KEY are optional -- the worker degrades to a
+      # quiet "not configured" response if they're unset, so this job always succeeds even before
+      # you've created a Coinbase API key. See workers/coinbase-balance-proxy/wrangler.toml.
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/coinbase-balance-proxy
+          command: deploy
+          secrets: |
+            COINBASE_CDP_KEY_NAME
+            COINBASE_CDP_PRIVATE_KEY
+        env:
+          COINBASE_CDP_KEY_NAME: ${{ secrets.COINBASE_CDP_KEY_NAME }}
+          COINBASE_CDP_PRIVATE_KEY: ${{ secrets.COINBASE_CDP_PRIVATE_KEY }}
+
   deploy-site:
     runs-on: ubuntu-latest
     needs:
@@ -142,6 +162,7 @@ jobs:
       - deploy-kalshi-btc15
       - deploy-refprice-proxy
       - deploy-deribit-iv-proxy
+      - deploy-coinbase-balance-proxy
     steps:
       - uses: actions/checkout@v4
       - name: Fill in Worker URLs

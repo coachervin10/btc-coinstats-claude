@@ -1,0 +1,15 @@
+name = "coinbase-balance-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# Two secrets, both read-only by construction -- see src/worker.js for the full rationale:
+#   COINBASE_CDP_KEY_NAME     "organizations/{org_id}/apiKeys/{key_id}"
+#   COINBASE_CDP_PRIVATE_KEY  the PEM-formatted EC private key Coinbase shows you once at
+#                             creation time
+# Set with:
+#   wrangler secret put COINBASE_CDP_KEY_NAME --config workers/coinbase-balance-proxy/wrangler.toml
+#   wrangler secret put COINBASE_CDP_PRIVATE_KEY --config workers/coinbase-balance-proxy/wrangler.toml
+# or as encrypted GitHub Actions secrets of the same names (see .github/workflows/deploy.yml).
+# Create the key itself at https://www.coinbase.com/settings/api with ONLY the "View" permission
+# checked -- leave Trade, Transfer and Receive unchecked, so the key this Worker uses physically
+# cannot place an order or move funds no matter what this code does.
