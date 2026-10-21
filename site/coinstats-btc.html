@@ -3618,12 +3618,19 @@ function renderLedger(){
     else if (b.status === 'closed'){
       res.textContent = (b.closeReason === 'target' ? 'take profit ' : (b.closeReason === 'stop' ? 'stop loss ' : 'closed early ')) + (b.pnl >= 0 ? '+' : '\u2212') + '$' + Math.abs(b.pnl).toFixed(2) + ' at ' + Math.round(b.closePrice * 100) + '\u00a2';
       res.className = b.pnl >= 0 ? 'up' : 'down';
+      var gl1 = document.createElement('div'); gl1.style.color = 'var(--dim)'; gl1.textContent = 'paid ' + money(b.stake) + ' \u2192 back ' + money(b.returned || 0); res.appendChild(gl1);
       if (b.heldPnl != null){ var hs = document.createElement('div'); hs.style.color = 'var(--dim)'; hs.textContent = 'holding would have been ' + (b.heldPnl >= 0 ? '+' : '\u2212') + '$' + Math.abs(b.heldPnl).toFixed(2); res.appendChild(hs); }
     }
     else if (b.status === 'needs_brti') res.textContent = 'no price near expiry: type the BRTI';
     else {
       res.textContent = (b.won === true ? '+' : b.won === false ? '\u2212' : '') + '$' + Math.abs(b.pnl).toFixed(2) + (b.source === 'brti' ? ' (BRTI)' : '');
       res.className = b.won === true ? 'up' : b.won === false ? 'down' : '';
+      /* The net profit above is what actually matters, but it reads as if the stake vanished on a win --
+         it didn't: a winning contract pays $1, so the full payout (stake back + profit) already landed
+         in the balance at settlement (see settle()). This line just makes that visible. */
+      var gl2 = document.createElement('div'); gl2.style.color = 'var(--dim)';
+      gl2.textContent = b.won === true ? ('paid ' + money(b.stake) + ' \u2192 back ' + money(b.returned || 0)) : (b.won === false ? ('paid ' + money(b.stake) + ' \u2192 back $0.00') : '');
+      if (gl2.textContent) res.appendChild(gl2);
     }
     if (b.status === 'settled' || b.status === 'needs_brti' || ((b.status === 'closed' || b.status === 'canceled') && Date.now() >= b.expiry)){
       var sub = document.createElement('div'); sub.style.marginTop = '4px';
