@@ -1,4 +1,4 @@
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const KALSHI = 'https://api.elections.kalshi.com/trade-api/v2';
 const SERIES = 'KXBTC15M';
 const SUPPORTED = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -28,6 +28,20 @@ const TOOLS = [
       additionalProperties: false,
     },
     annotations: { title: 'Kalshi BTC 15-minute orderbook', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'get_btc15_history',
+    description:
+      "Kalshi's most recently settled 15-minute Bitcoin Up/Down markets (series KXBTC15M). For each window: the strike it was judged against, " +
+      "the index value Kalshi actually settled on (expiration_value), and the yes/no result. Read-only.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many recently-settled windows to return (default 50).' },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: 'Kalshi BTC 15-minute settlement history', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
 ];
 
@@ -123,6 +137,54 @@ async function loadMarkets(env) {
       .finally(() => { marketCache.pending = null; });
   }
   return marketCache.pending;
+}
+
+/* Settled markets change rarely (new ones appear roughly every 15 minutes) and the caller's own
+   khTick() polls at most every few minutes, so a longer, separate cache is fine here -- no need
+   to share loadMarkets()'s 1s TTL, which exists only because the open-market price moves every tick. */
+const historyCache = { at: 0, limit: 0, body: null, pending: null };
+const HISTORY_TTL_MS = 60000;
+async function loadHistory(limit) {
+  if (historyCache.body && historyCache.limit >= limit && Date.now() - historyCache.at < HISTORY_TTL_MS) return { body: historyCache.body, at: historyCache.at };
+  if (!historyCache.pending) {
+    historyCache.pending = kalshiGet('/markets?series_ticker=' + SERIES + '&status=settled&limit=' + limit)
+      .then((body) => { historyCache.body = body; historyCache.limit = limit; historyCache.at = Date.now(); return { body, at: historyCache.at }; })
+      .finally(() => { historyCache.pending = null; });
+  }
+  return historyCache.pending;
+}
+
+/** A settled market: same Market object shape as the open ones, plus settlement fields
+   (result, expiration_value -- the index value Kalshi actually judged the window against).
+   expiration_value arrives as a numeric string on some replies, a number on others. */
+function normalizeSettled(m) {
+  let target = num(m.floor_strike);
+  if (target == null) target = num(m.cap_strike);
+  if (target == null) target = num(m.strike);
+  if (target == null) target = targetFromText(m);
+  const warnings = [];
+  const official = num(m.expiration_value);
+  if (official == null) warnings.push('settled market ' + (m.ticker || '?') + ' had no readable expiration_value.');
+  return { ticker: m.ticker, close_time: m.close_time || null, target, expiration_value: official, result: m.result || null, warning: official == null ? warnings[0] : null };
+}
+
+async function toolHistory(args, env) {
+  args = args || {};
+  let limit = 50;
+  if (args.limit !== undefined) {
+    limit = Number(args.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) return fail('limit must be a whole number from 1 to 200.');
+  }
+  const { body, at } = await loadHistory(limit);
+  const list = (body && body.markets) || [];
+  const windows = list.map(normalizeSettled).filter((w) => w.close_time && Number.isFinite(Date.parse(w.close_time)));
+  const warnings = windows.filter((w) => w.warning).map((w) => w.warning);
+  return ok({
+    ok: true,
+    windows: windows.map((w) => ({ ticker: w.ticker, close_time: w.close_time, target: w.target, expiration_value: w.expiration_value, result: w.result })),
+    fetched_at: iso(at), count: windows.length,
+    warnings,
+  });
 }
 
 /* ------------------------------------------------------------------ orderbook ------------------------------------------------------------------ */
@@ -223,7 +285,7 @@ async function toolBook(args, env) {
   return ok(data);
 }
 
-const HANDLERS = { get_btc15_market: toolMarket, get_btc15_orderbook: toolBook };
+const HANDLERS = { get_btc15_market: toolMarket, get_btc15_orderbook: toolBook, get_btc15_history: toolHistory };
 
 /* ------------------------------------------------------------------ MCP / JSON-RPC ------------------------------------------------------------------ */
 
@@ -289,6 +351,12 @@ async function handleRest(request, url, env) {
     if (url.searchParams.has('depth')) args.depth = Number(url.searchParams.get('depth'));
     if (url.searchParams.has('contracts')) args.contracts = Number(url.searchParams.get('contracts'));
     const r = await toolBook(args, env);
+    return json(r.isError ? 502 : 200, { payload: r.structuredContent });
+  }
+  if (url.pathname === '/api/history') {
+    const args = {};
+    if (url.searchParams.has('limit')) args.limit = Number(url.searchParams.get('limit'));
+    const r = await toolHistory(args, env);
     return json(r.isError ? 502 : 200, { payload: r.structuredContent });
   }
   return json(404, { error: 'not_found' });

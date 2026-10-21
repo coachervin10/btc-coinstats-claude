@@ -70,9 +70,9 @@ successful run, or in that job's log output.
 ## A note on `kalshi-btc15`
 
 This Worker was already live before this project existed, serving Kalshi's 15-minute BTC market
-data to a Claude MCP connector at `/mcp/<MCP_PATH_TOKEN>`. This repo adds two new REST routes
-(`/api/market`, `/api/orderbook`) for the standalone page, alongside the original MCP route,
-without touching it.
+data to a Claude MCP connector at `/mcp/<MCP_PATH_TOKEN>`. This repo adds three new REST routes
+(`/api/market`, `/api/orderbook`, `/api/history`) for the standalone page, alongside the original
+MCP route, without touching it.
 
 The deploy workflow **deliberately does not set or rotate** that Worker's `MCP_PATH_TOKEN`
 secret — redeploying the code does not change an existing secret's value. If you ever do need to
@@ -82,13 +82,17 @@ rotate it, run this yourself from a machine with `wrangler` installed and logged
 wrangler secret put MCP_PATH_TOKEN --config workers/kalshi-btc15/wrangler.toml
 ```
 
-Two Kalshi features in the page aren't implemented yet on this Worker and will show as
-unavailable rather than erroring loudly:
-- the BRTI settlement-history backfill (`get_btc15_history`)
-- the live BRTI ticker feed (`get_brti_live`)
+`/api/history` (`get_btc15_history`) backs the page's "auto-fill the BRTI from Kalshi's own
+settlement value" feature (the `kalshiOfficialOn` checkbox): it calls the same public, no-auth
+`/markets` endpoint already used for the open market, just with `status=settled`, and reads each
+settled window's own `expiration_value` field — the index value Kalshi actually judged that
+window against — plus its strike and result. No API key or account needed; this is public data.
 
-Both are optional — the core page (price tracking, the model, paper trading, the Kalshi strike
-comparison) works fully without them.
+One Kalshi feature in the page still isn't implemented on this Worker and will show as
+unavailable rather than erroring loudly: the live, authenticated BRTI ticker feed
+(`get_brti_live`), which needs your own Kalshi API key and possibly a separate CF Benchmarks
+entitlement. It's optional — the core page (price tracking, the model, paper trading, the Kalshi
+strike comparison, and the settlement-history BRTI autofill above) works fully without it.
 
 ## Three new order-flow signals (CVD, open interest, funding rate)
 

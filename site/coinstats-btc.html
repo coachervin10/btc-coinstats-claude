@@ -958,6 +958,7 @@ async function callApi(server, tool, input){
     base = API_BASE.kalshi;
     if (tool === 'get_btc15_market') path = '/api/market';
     else if (tool === 'get_btc15_orderbook') path = '/api/orderbook';
+    else if (tool === 'get_btc15_history') path = '/api/history';
     else throw {code:'tool_error', message:'unknown tool: kalshi-btc15 has no REST route for ' + tool + ' yet (see README.md)'};
     Object.keys(input).forEach(function(k){ qs.set(k, input[k]); });
   } else if (server === 'refprice'){
