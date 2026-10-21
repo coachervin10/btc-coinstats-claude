@@ -2617,19 +2617,26 @@ function computeMomentumRaw(){
     items.push({name:priorName, src:'CoinStats', val:bi.priorGreens + '/3 green, avg ' + signedPct(bi.priorAvg, 2) + '%', lean:bi.priorLean});
     factors.push(wl(bollName, bi.bollLean)); factors.push(wl(priorName, bi.priorLean));
   }
+  /* "Change, last 2 min" and "EMA 9v21, 1-min bars" are both reads of the SAME ~1-2 minute window
+     of price action (one from this page's own live samples, one from Crypto.com's 1-min candles)
+     -- they will almost always agree, so counting them as two separate votes quietly double-weights
+     one observation ("has price just ticked up or down") against every other, genuinely distinct
+     timeframe here. Averaged into one vote instead, same as the RSI/Stochastic/AO/AC group above. */
+  var veryShort = [];
   var r2 = liveChange(120);
   if (r2 != null){
     var l4 = clamp(r2 / (vol.perSec * Math.sqrt(120)) / 2, -1, 1), n2name = 'Change, last 2 min (live)';
     items.push({name:n2name, src:'this page', val:signedPct(r2, 3) + '%', lean:l4});
-    factors.push(wl(n2name, l4));
+    veryShort.push(wl(n2name, l4));
   }
   if ($('useCdc').checked && cdc.candles1 && cdc.candles1.length >= 25){
     var c1cl = cdc.candles1.map(function(c){ return c.close; }), n1 = c1cl.length - 1;
     var e9a = ema(c1cl, 9), e21a = ema(c1cl, 21), d1 = (e9a[n1] - e21a[n1]) / e21a[n1];
     var l5 = clamp(d1 / (2 * vol.slow / Math.sqrt(5)), -1, 1), n1name = 'EMA 9 vs 21, 1-min bars';
     items.push({name:n1name, src:'Crypto.com, 1m', val:signedPct(d1, 3) + '%', lean:l5});
-    factors.push(wl(n1name, l5));
+    veryShort.push(wl(n1name, l5));
   }
+  if (veryShort.length) factors.push(veryShort.reduce(function(a, x){ return a + x; }, 0) / veryShort.length);   // the two very-short-horizon reads count once
   var sig = cdcSignals();
   if (sig){
     var obName = 'Order book (\u00b10.5%)', flowName = 'Taker flow (60s)';
