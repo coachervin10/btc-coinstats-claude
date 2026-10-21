@@ -508,6 +508,22 @@ body.view-simple .adv{ display:none !important; }
           set in Paper trading, and still throttled down after a losing streak like the other sizing modes.
         </div>
         <div class="prob-meta" id="kellyPreview" style="margin:0 0 10px; font-weight:600;">&mdash;</div>
+        <label class="row" style="margin:0 0 6px;"><input type="checkbox" id="calibShrinkOn"><span>shrink Kelly&rsquo;s probability toward this page&rsquo;s own calibration (recommended once Indicator calibration below has enough settled bets &mdash; keeps a model that&rsquo;s overconfident at high stated odds from oversizing on it)</span></label>
+        <div class="target-row" style="margin:0 0 6px;">
+          <label for="autoPauseStreak" class="prob-meta">Stop auto-trading after</label>
+          <select id="autoPauseStreak" aria-label="Consecutive losses that pause auto-trading">
+            <option value="0">never (losing streaks only shrink size, per the Kelly note above)</option>
+            <option value="4">4 losses in a row</option>
+            <option value="6" selected>6 losses in a row</option>
+            <option value="8">8 losses in a row</option>
+          </select>
+        </div>
+        <div class="prob-meta" style="margin:-6px 0 10px;">
+          A streak this long into a session that was passing its own gates is more likely a regime the model doesn't fit right now than
+          bad luck. Separate from the daily balance cap above (which only trips on dollars lost) &mdash; this can trip on a bad run of small
+          bets before the dollar cap would ever notice. Same behavior as the daily cap: switches auto-trading off and stays off until you
+          tick the box again.
+        </div>
       </div>
 
       <div class="card collapsed adv" id="card-trendstreak">
@@ -683,6 +699,23 @@ body.view-simple .adv{ display:none !important; }
           <thead><tr><th>Indicator</th><th>Agree (n, win%)</th><th>Disagree (n, win%)</th><th>Read</th></tr></thead>
           <tbody id="calibBody"></tbody>
         </table>
+        <div class="note" style="margin-top:14px; padding-top:14px;">
+          <strong>Probability calibration</strong> &mdash; a different question from the indicator table above: when the model itself
+          says, say, 80% at entry, does that side actually win about 80% of the time? Bucketed by the stated probability at entry.
+          Needs at least 20 settled bets in a bucket before it's used for anything (the Kelly-sizing shrink toggle above reads this
+          table, weighted by how much data is actually in the relevant bucket).
+        </div>
+        <table>
+          <thead><tr><th>Stated probability</th><th>n</th><th>Actual win% (95% range)</th><th>Read</th></tr></thead>
+          <tbody id="probCalibBody"></tbody>
+        </table>
+        <div class="note" style="margin-top:14px; padding-top:14px;">
+          <strong>Price-source agreement</strong> &mdash; CoinStats, Kalshi's live BRTI and the cross-exchange reference price are
+          usually close but not identical; this checks whether bets placed when they disagreed more actually did worse, which
+          would mean part of a stated edge was sometimes just two sources disagreeing rather than real signal. Only bets placed
+          since this check was added have a saved reading.
+        </div>
+        <div class="prob-meta" id="divergenceSummary" style="margin-bottom:8px;"></div>
         <div class="note" style="margin-top:14px; padding-top:14px;">
           <strong>Calibration drift</strong> &mdash; compares your most recent bets against everything before them. A model that's
           quietly gotten worse (or better) since you last checked should show up here before it shows up as a losing streak.
@@ -1156,23 +1189,38 @@ var KALSHI_MAIN_MAX_AGE_MS = 5000;
 /* Whether the live authenticated BRTI feed is currently fresh and connected enough to price off of.
    Deliberately strict: this only ever returns true for data that arrived within the last few seconds
    from a connection the server itself reports as connected -- never a stale cached value. */
-function kalshiMainFresh(){
-  if (!$('kalshiMainOn').checked) return null;
+function kalshiRawFresh(){
   var d = kalshiLive.data;
   if (!d || !d.connected || !d.brti) return null;
   var age = (Date.now() - kalshiLive.recvAt) + (d.brti.age_ms || 0);
   return age <= KALSHI_MAIN_MAX_AGE_MS ? {value:d.brti.value, age:age} : null;
 }
+function kalshiMainFresh(){ return $('kalshiMainOn').checked ? kalshiRawFresh() : null; }
 var REFP_MAIN_MAX_AGE_MS = 15000;    // 3x refpricePoll's 5s interval -- tolerates one missed poll without falling back
 /* Whether the cross-exchange reference price (refprice-proxy's volume-weighted Coinbase/Kraken/
    Bitstamp/Gemini/Bullish/itBit average) is currently fresh enough to price off of. Same shape and
    same strictness policy as kalshiMainFresh above: only a recent, successfully-answered read, never
    a stale cached one. */
-function refpMainFresh(){
-  if (!$('refpMainOn').checked) return null;
+function refpRawFresh(){
   if (refp.notConfigured || !refp.data || refp.data.vwap == null) return null;
   var age = Date.now() - refp.recvAt;
   return age <= REFP_MAIN_MAX_AGE_MS ? {value:refp.data.vwap, age:age} : null;
+}
+function refpMainFresh(){ return $('refpMainOn').checked ? refpRawFresh() : null; }
+/* ---------- price-source divergence: are CoinStats, Kalshi's live BRTI and the cross-exchange VWAP actually agreeing right now? ----------
+   livePrice() always silently picks exactly one of these as "the" price and falls back when a source isn't fresh -- so a stated edge can
+   sometimes be partly just two sources disagreeing, not real signal. This checks whichever sources are fresh RIGHT NOW regardless of which
+   one is actually wired up as the main price, purely so new bets can be tagged with it; runDivergenceCheck() below is what actually asks
+   whether that tag means anything. Never used to gate or block a trade by itself. */
+function priceDivergence(){
+  var s = latest(), base = s ? cval(s) : null, vals = [];
+  if (base != null) vals.push(base);
+  var kx = kalshiRawFresh(); if (kx) vals.push(kx.value);
+  var rp = refpRawFresh(); if (rp) vals.push(rp.value);
+  if (vals.length < 2) return null;
+  var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  var mid = vals.reduce(function(a, x){ return a + x; }, 0) / vals.length;
+  return {pct:mid > 0 ? (hi - lo) / mid * 100 : 0, n:vals.length};
 }
 /* The single source of truth for "the current price," used by the odds model, the display, and
    everything else that used to compute cval(latest()) on its own. Ordinarily the CoinStats-derived
@@ -2562,7 +2610,8 @@ function placeBet(side, opts){
   var leftMs = o.E - Date.now();
   var newBet = {id:Date.now(), placedAt:Date.now(), leftMs:leftMs, periodMin:(+$('period').value || 15), side:side, strike:o.K, expiry:o.E, stake:stake, contracts:contracts, price:cprice, prob:prob, pBase:side === 'above' ? o.pBase : 1 - o.pBase, lean:o.lean, sdUsd:o.sdUsd, volMult:o.mult, mu:o.mu, momMode:o.momMode, entryPrice:o.S, entryPerSec:o.perSec, volCands:o.volCands, kalshi:kalshiSnapshot(side, o), origContracts:contracts, status:'open', auto:!!opts.auto, tier:opts.tier || null, reentry:isReentry,
     baseEdge:Math.round(((side === 'above' ? o.pManual : 1 - o.pManual) - 0.5) * 1000) / 10,
-    fx:(o.mom && o.mom.items) ? o.mom.items.map(function(x){ return [x.name, Math.round(x.lean * 100) / 100]; }) : null};
+    fx:(o.mom && o.mom.items) ? o.mom.items.map(function(x){ return [x.name, Math.round(x.lean * 100) / 100]; }) : null,
+    divPct:(function(){ var d = priceDivergence(); return d ? Math.round(d.pct * 1000) / 1000 : null; })()};
   paper.bets.push(newBet);
   savePaper();
   try { shadowOnOpen(newBet); } catch (e) { /* shadow automation is a rehearsal feature only -- never let it block a real paper bet */ }
@@ -2892,6 +2941,101 @@ function renderCalibration(){
     td(row.read, row.verdict === 'unknown' || row.verdict === 'unproven');
     body.appendChild(tr);
   });
+}
+
+/* ---------- probability calibration: does a stated X% actually win X% of the time? ----------
+   A different question from the per-indicator agree/disagree table above -- this buckets settled
+   bets by the model's own stated probability at entry (b.prob) and checks the realized hit rate in
+   each bucket. Feeds two things: the read-only table below, and (if the Kelly card's shrink toggle
+   is on) calibAdjustedProb(), which is what actually changes Kelly's sizing -- a model that's
+   overconfident at high stated odds should get sized down there before it's sized down by a losing
+   streak. Cached by bet count + the id of the newest settled bet, since it's asked for every tick
+   that Kelly sizing runs, not just when this card is opened. */
+var PROB_CALIB_BUCKETS = [[0.50, 0.55], [0.55, 0.60], [0.60, 0.65], [0.65, 0.70], [0.70, 0.75], [0.75, 0.80], [0.80, 0.90], [0.90, 1.01]];
+var PROB_CALIB_MIN_N = 20;
+var probCalibMemo = null;
+function runProbCalibration(){
+  var decided = paper.bets.filter(function(b){ return b.status === 'settled' && b.won !== null && typeof b.prob === 'number'; });
+  var key = decided.length + ':' + (decided.length ? decided[decided.length - 1].id : 0);
+  if (probCalibMemo && probCalibMemo.key === key) return probCalibMemo.val;
+  var buckets = PROB_CALIB_BUCKETS.map(function(edge){ return {lo:edge[0], hi:edge[1], n:0, wins:0, probSum:0}; });
+  decided.forEach(function(b){
+    var p = Math.max(b.prob, 1 - b.prob);   // the confidence the model had in whichever side was actually bet
+    var bk = buckets.filter(function(x){ return p >= x.lo && p < x.hi; })[0];
+    if (!bk) return;
+    bk.n++; bk.probSum += p; if (b.won) bk.wins++;
+  });
+  var rows = buckets.filter(function(b){ return b.n > 0; }).map(function(b){
+    var hitRate = b.wins / b.n, avgStated = b.probSum / b.n, ci = wilsonInterval(b.wins, b.n);
+    var read = 'not enough data yet (need ' + PROB_CALIB_MIN_N + ')';
+    if (b.n >= PROB_CALIB_MIN_N){
+      var gap = (hitRate - avgStated) * 100;
+      read = Math.abs(gap) < 5 ? 'well calibrated' : (gap < 0 ? 'overconfident by about ' + Math.abs(gap).toFixed(0) + ' pts' : 'underconfident by about ' + Math.abs(gap).toFixed(0) + ' pts');
+    }
+    return {lo:b.lo, hi:b.hi, n:b.n, wins:b.wins, hitRate:hitRate, avgStated:avgStated, ci:ci, read:read};
+  });
+  var val = {bets:decided.length, rows:rows};
+  probCalibMemo = {key:key, val:val};
+  return val;
+}
+function renderProbCalibration(){
+  var r = runProbCalibration(), body = $('probCalibBody');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!r.rows.length){
+    var tr = document.createElement('tr'), td = document.createElement('td');
+    td.colSpan = 4; td.style.color = 'var(--dim)'; td.textContent = 'No settled bets with a saved probability yet.';
+    tr.appendChild(td); body.appendChild(tr); return;
+  }
+  r.rows.forEach(function(row){
+    var tr = document.createElement('tr');
+    function td(text, dim){ var d = document.createElement('td'); d.textContent = text; if (dim) d.style.color = 'var(--dim)'; tr.appendChild(d); }
+    td(Math.round(row.lo * 100) + '–' + Math.round(Math.min(row.hi, 1) * 100) + '% (avg ' + Math.round(row.avgStated * 100) + '%)');
+    td(String(row.n));
+    td(Math.round(row.hitRate * 100) + '% (' + pctRange(row.ci) + ')');
+    td(row.read, row.n < PROB_CALIB_MIN_N);
+    body.appendChild(tr);
+  });
+}
+/* The only thing that actually changes behavior: shrinks a stated probability toward this page's own
+   realized hit rate in that bucket, weighted by how much data is in it (more settled bets -> more
+   weight on what actually happened, less on what the model claimed). With under PROB_CALIB_MIN_N
+   bets in the relevant bucket, or the toggle off, this is a no-op and returns prob unchanged. */
+function calibAdjustedProb(prob){
+  if (!$('calibShrinkOn') || !$('calibShrinkOn').checked) return prob;
+  var p = Math.max(prob, 1 - prob), r = runProbCalibration();
+  var bk = r.rows.filter(function(x){ return p >= x.lo && p < x.hi && x.n >= PROB_CALIB_MIN_N; })[0];
+  if (!bk) return prob;
+  var w = Math.min(1, bk.n / (bk.n + 20));         // credibility weight: needs real sample size to fully trust the observed rate over the model
+  var pAdj = p + (bk.hitRate - p) * w;
+  return prob >= 0.5 ? pAdj : 1 - pAdj;
+}
+/* ---------- does price-source disagreement at entry actually predict a worse outcome? ----------
+   Splits settled bets with a saved divPct at a simple median split (not a fixed cutoff, since what counts
+   as "high" divergence depends on how volatile things have been) and compares win rates. Informational
+   only -- nothing currently gates on this; it exists so that question has an actual answer instead of a
+   hunch, same spirit as the rest of this card. */
+function runDivergenceCheck(){
+  var decided = paper.bets.filter(function(b){ return b.status === 'settled' && b.won !== null && typeof b.divPct === 'number'; });
+  if (decided.length < 30) return {enough:false, have:decided.length, need:30};
+  var sorted = decided.map(function(b){ return b.divPct; }).sort(function(a, b){ return a - b; });
+  var med = sorted[Math.floor(sorted.length / 2)];
+  var lowG = decided.filter(function(b){ return b.divPct <= med; }), hiG = decided.filter(function(b){ return b.divPct > med; });
+  if (!lowG.length || !hiG.length) return {enough:false, have:decided.length, need:30};
+  function wins(g){ return g.filter(function(b){ return b.won; }).length; }
+  var lowWin = wins(lowG), hiWin = wins(hiG);
+  var cmp = compareRates(hiWin, hiG.length, lowWin, lowG.length), diff = cmp.diff * 100;
+  var read = 'no proven difference between higher- and lower-divergence bets — any gap is within sampling noise';
+  if (cmp.significant && cmp.direction < 0) read = 'bets placed when sources disagreed more have won ' + Math.abs(diff).toFixed(0) + ' pts less often, beyond sampling noise — worth treating source disagreement as a caution flag before betting';
+  else if (cmp.significant) read = 'bets placed when sources disagreed more have actually won ' + diff.toFixed(0) + ' pts more often — no sign this is something to avoid';
+  return {enough:true, n:decided.length, medianPct:med, lowN:lowG.length, hiN:hiG.length, lowWin:lowWin / lowG.length, hiWin:hiWin / hiG.length, read:read};
+}
+function renderDivergenceCheck(){
+  var el = $('divergenceSummary');
+  if (!el) return;
+  var d = runDivergenceCheck();
+  if (!d.enough){ el.textContent = 'Needs at least ' + d.need + ' settled bets with a saved price-source reading to check (have ' + d.have + ').'; return; }
+  el.textContent = 'Split at the median (' + d.medianPct.toFixed(3) + '% spread): lower-divergence ' + d.lowN + ' bets, ' + Math.round(d.lowWin * 100) + '% won; higher-divergence ' + d.hiN + ' bets, ' + Math.round(d.hiWin * 100) + '% won. ' + d.read + '.';
 }
 function runDrift(){
   var dec = paper.bets.filter(function(b){ return b.status === 'settled' && b.won !== null; }).sort(function(a, b){ return a.placedAt - b.placedAt; });
@@ -4032,7 +4176,11 @@ function kellySizeNow(side, o, throttle){
   var qModel = side === 'above' ? o.pAbove : o.pBelow, cprice = contractPrice(qModel);
   var kal = kalshiSnapshot(side, o);
   var refPrice = (kal && kal.quoted && kal.ask != null) ? clamp(kal.ask + kal.fee, 0.01, 0.99) : contractPrice(side === 'above' ? o.pManual : 1 - o.pManual);
-  var fStar = Math.max(0, (qModel - refPrice) / (1 - refPrice));
+  /* cprice (what you'd actually pay) stays on the model's raw q -- only the q fed into Kelly's edge
+     math is shrunk toward this page's own calibration, so a possibly-overconfident model can't size
+     up on an edge that hasn't actually shown up in results. */
+  var qKelly = calibAdjustedProb(qModel), calibShrunk = Math.abs(qKelly - qModel) > 0.001;
+  var fStar = Math.max(0, (qKelly - refPrice) / (1 - refPrice));
   var kFrac = +$('kellyFraction').value || 0.25;
   var kellyStake = paper.balance * kFrac * fStar;
   var contracts = Math.max(1, Math.round((kellyStake / cprice) * (throttle == null ? 1 : throttle)));
@@ -4041,7 +4189,7 @@ function kellySizeNow(side, o, throttle){
     var maxContracts = Math.max(1, Math.floor(paper.balance * (maxRiskPct / 100) / cprice));
     if (contracts > maxContracts){ contracts = maxContracts; riskCapped = true; }
   }
-  return {contracts:contracts, cprice:cprice, refPrice:refPrice, fStar:fStar, kellyStake:kellyStake, riskCapped:riskCapped};
+  return {contracts:contracts, cprice:cprice, refPrice:refPrice, fStar:fStar, kellyStake:kellyStake, riskCapped:riskCapped, calibShrunk:calibShrunk, qModel:qModel, qKelly:qKelly};
 }
 function renderKellyPreview(){
   var el = $('kellyPreview');
@@ -4054,6 +4202,7 @@ function renderKellyPreview(){
   var stake = Math.round(k.contracts * k.cprice * 100) / 100;
   el.textContent = 'Kelly would currently bet ' + k.contracts + ' contract' + (k.contracts === 1 ? '' : 's') + ' ' + (side === 'above' ? 'over' : 'under') + ' at ' + Math.round(k.cprice * 100) + '¢, costing ' + money(stake) + ' (' + (stake / paper.balance * 100).toFixed(1) + '% of balance)' +
     (k.fStar <= 0 ? ' — no edge over the reference price right now, so this floors to the 1-contract minimum' : ', edge ' + (k.fStar * 100).toFixed(1) + '% of bankroll before the ' + ($('kellyFraction').value * 100).toFixed(0) + '% fraction') +
+    (k.calibShrunk ? ' (probability shrunk from ' + Math.round(k.qModel * 100) + '% to ' + Math.round(k.qKelly * 100) + '% by this page\'s own calibration).' : '') +
     (k.riskCapped ? '. Reduced to fit your max-risk-per-trade cap.' : (throttle < 1 ? '. Sized down after ' + streak + ' losses in a row.' : '.'));
 }
 
@@ -4064,6 +4213,15 @@ function autoCheck(){
   if (paper.balance <= paper.dayStart * 0.8){
     $('autoOn').checked = false; put(K.autoOn, '0'); paper.capHit = true; savePaper(); autoHold = null;
     autoLast = 'Daily loss cap hit: your balance ' + money(paper.balance) + ' is 20% or more below where the day started (' + money(paper.dayStart) + '). Auto-trading switched itself off. Tick the box again to start a fresh baseline.';
+    autoWhy = ''; autoStatusText(); return;
+  }
+  /* A hard stop, separate from the dollar cap above: a long losing streak made of small bets can run
+     well past what the dollar cap would ever notice, and a streak this long against gates that were
+     passing is more likely a regime the model doesn't fit right now than bad luck. */
+  var pauseAt = +$('autoPauseStreak').value || 0, streakNow = lossStreak();
+  if (pauseAt > 0 && streakNow >= pauseAt){
+    $('autoOn').checked = false; put(K.autoOn, '0'); autoHold = null;
+    autoLast = 'Stopped after ' + streakNow + ' losses in a row (your pause threshold is ' + pauseAt + '). Auto-trading switched itself off. Tick the box again once you\'ve reviewed what happened.';
     autoWhy = ''; autoStatusText(); return;
   }
   var o = currentOdds(), now = Date.now();
@@ -4663,7 +4821,11 @@ $('copyExport').addEventListener('click', function(){
   else { box.focus(); box.select(); syncStatus('Select the text and copy it yourself (Ctrl+C or Cmd+C).'); }
 });
 $('importBtn').addEventListener('click', doImport);
-$('calibRun').addEventListener('click', function(){ renderCalibration(); renderDrift(); });
+$('calibRun').addEventListener('click', function(){ renderCalibration(); renderProbCalibration(); renderDivergenceCheck(); renderDrift(); });
+$('calibShrinkOn').checked = get('cs_calib_shrink_on_v1', '1') === '1';
+$('calibShrinkOn').addEventListener('change', function(){ put('cs_calib_shrink_on_v1', $('calibShrinkOn').checked ? '1' : '0'); probCalibMemo = null; tick(); });
+$('autoPauseStreak').value = get('cs_auto_pause_streak_v1', '6');
+$('autoPauseStreak').addEventListener('change', function(){ put('cs_auto_pause_streak_v1', $('autoPauseStreak').value); });
 $('driftRecentN').value = get('cs_drift_n_v1', '30');
 $('driftRecentN').addEventListener('change', function(){ put('cs_drift_n_v1', $('driftRecentN').value); renderDrift(); });
 setupCollapsibleCards();

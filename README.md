@@ -174,6 +174,35 @@ Claude will not place a real trade or transfer real funds on your behalf under a
 that's a fixed rule, not a setting. Phase 2, if and when you want it, is code you'd run yourself
 under your own credentials and your own risk.
 
+## Decision-quality improvements (calibration, consecutive-loss stop, source agreement)
+
+Added to `site/coinstats-btc.html` only (no new Worker) — three additions aimed at making entry
+decisions more evidence-based rather than just intuition-tuned:
+
+- **Probability calibration, feeding Kelly sizing.** A new table in Indicator calibration buckets
+  your own settled bets by the model's stated probability at entry and checks the realized win
+  rate in each bucket — a different question from the existing per-indicator agree/disagree table,
+  which only asks whether a bet matched what an indicator said. With the new "shrink Kelly's
+  probability toward this page's own calibration" toggle on (default on), `kellySizeNow()` shrinks
+  the probability it feeds into the Kelly formula toward whatever a bucket's own realized hit rate
+  has actually been, weighted by how much settled data is in that bucket — so a model that's
+  overconfident at high stated odds can't oversize on an edge that hasn't shown up in results. It
+  only touches the Kelly *sizing* input; the contract price you'd actually pay is unaffected. Needs
+  at least 20 settled bets in a probability bucket before it does anything; with less, sizing is
+  unchanged.
+- **A consecutive-loss stop, separate from the existing daily dollar cap.** "Stop auto-trading
+  after N losses in a row" (default 6, in the auto-trading settings) switches auto-trading off the
+  same way the daily balance cap already does, and needs the same manual re-check to resume. The
+  dollar cap can take a while to trip on a run of small bets; this catches that run on its own
+  terms, since a losing streak that long against gates that were passing is more likely a regime
+  the model doesn't currently fit than bad luck.
+- **Price-source agreement check.** New bets now save how far apart CoinStats, Kalshi's live BRTI,
+  and the cross-exchange reference price were at the moment they were placed (whichever of those
+  are fresh right now, regardless of which one is actually wired up as the main price). A new
+  read-only check in Indicator calibration splits settled bets at the median of that spread and
+  compares win rates, so "is some of my edge actually just two price sources disagreeing" has an
+  actual answer instead of a hunch. Only bets placed after this was added carry the reading.
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run
