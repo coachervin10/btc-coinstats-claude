@@ -7,3 +7,12 @@ CREATE TABLE IF NOT EXISTS state (
   data TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+-- price_5m: a growing, server-side BTC/USD 5-minute price history, built by coinstats-proxy's
+-- own scheduled() cron (see workers/coinstats-proxy/wrangler.toml). CoinStats' chart endpoint
+-- only ever exposes the trailing 24 hours itself; this is what lets a backtest reach further
+-- back than that, a little more every 20 minutes, for as long as this project stays deployed.
+CREATE TABLE IF NOT EXISTS price_5m (
+  ts INTEGER PRIMARY KEY,
+  price REAL NOT NULL
+);

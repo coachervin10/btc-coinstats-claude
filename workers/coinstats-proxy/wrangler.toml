@@ -10,3 +10,21 @@ compatibility_date = "2026-09-01"
 # so this is the main lever on your credit usage; raise it if you're burning credits too fast.
 TICKER_CACHE_S = "3"
 CHART_CACHE_S = "60"
+
+# Price-history accumulator: CoinStats' own chart endpoint only ever exposes the trailing 24
+# hours at 5-min resolution, so a backtest can never see further back than whatever it's asked
+# at the moment -- it never actually accumulates on its own. This cron re-asks it every 20
+# minutes (comfortably inside that 24h/5-min window, so no gap ever opens between calls) and
+# appends only the brand-new points to D1 (INSERT OR IGNORE on the timestamp, so re-fetching the
+# same 24h window is harmless). From here on, history just keeps growing on its own, forever,
+# independent of whether anyone has the page open.
+[triggers]
+crons = ["*/20 * * * *"]
+
+# D1 database "btc-paper-store" -- the same one paper-store already uses. Reused here rather than
+# provisioning a second database, since this worker only adds one more table to it (price_5m);
+# see schema.sql in workers/paper-store (the GitHub Actions workflow applies it on every deploy).
+[[d1_databases]]
+binding = "DB"
+database_name = "btc-paper-store"
+database_id = "4f7c7399-928b-4cc5-a148-2e9327cc19f1"

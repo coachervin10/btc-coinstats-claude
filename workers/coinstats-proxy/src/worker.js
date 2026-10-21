@@ -17,6 +17,13 @@
  * Every response is cached at Cloudflare's edge for a few seconds (TICKER_CACHE_S / CHART_CACHE_S
  * vars in wrangler.toml) so a page with several open tabs, or several viewers, doesn't multiply
  * your CoinStats credit usage.
+ *
+ * Also runs a scheduled() cron (see wrangler.toml) every 20 minutes that re-reads the 24h chart
+ * and appends any new 5-minute points to D1 (price_5m) -- see that file's own comment for why.
+ *
+ *   GET /price-history?since=<unix_seconds>&limit=<n>
+ *       -> { payload: { rows: [[ts, price], ...] } }, oldest first, ts ascending.
+ *       since defaults to 0 (everything stored); limit defaults to 5000, max 20000.
  */
 
 const UPSTREAM = 'https://api.coinstats.app';
@@ -76,7 +83,40 @@ async function cachedUpstreamGet(request, ctx, path, search, apiKey, cacheSecond
   return resp;
 }
 
+async function fetchChart24h(apiKey) {
+  const search = new URLSearchParams({ period: '24h' });
+  const r = await upstreamGet('/v1/coins/bitcoin/charts', search, apiKey);
+  if (!r.ok || !Array.isArray(r.data)) throw new Error('chart fetch failed: ' + JSON.stringify(r.data));
+  return r.data; // [ts_seconds, priceUsd, priceBtc, priceEth][]
+}
+
+async function recordPriceHistory(env) {
+  if (!env.DB || !env.COINSTATS_API_KEY) return { ok: false, reason: 'not_configured' };
+  const rows = await fetchChart24h(env.COINSTATS_API_KEY);
+  const seen = new Set();
+  const stmts = [];
+  for (const r of rows) {
+    const ts = Math.round(Number(r[0])), price = Number(r[1]);
+    if (!Number.isFinite(ts) || !Number.isFinite(price) || seen.has(ts)) continue;
+    seen.add(ts);
+    stmts.push(env.DB.prepare('INSERT OR IGNORE INTO price_5m (ts, price) VALUES (?, ?)').bind(ts, price));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return { ok: true, points: stmts.length };
+}
+
+async function priceHistory(url, env) {
+  if (!env.DB) return json(500, { error: 'not_configured', detail: 'D1 binding missing.' });
+  const since = Number(url.searchParams.get('since') || 0) || 0;
+  const limit = Math.min(20000, Math.max(1, Number(url.searchParams.get('limit') || 5000)));
+  const { results } = await env.DB.prepare('SELECT ts, price FROM price_5m WHERE ts >= ? ORDER BY ts ASC LIMIT ?').bind(since, limit).all();
+  return json(200, { payload: { rows: results.map((r) => [r.ts, r.price]) } }, { 'cache-control': 'no-store' });
+}
+
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(recordPriceHistory(env).catch(() => {}));
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -84,6 +124,7 @@ export default {
     if (url.pathname === '/' || url.pathname === '/health') {
       return json(200, { ok: true, name: 'coinstats-proxy', configured: !!env.COINSTATS_API_KEY });
     }
+    if (url.pathname === '/price-history') return priceHistory(url, env);
     if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' });
     if (!env.COINSTATS_API_KEY) {
       return json(500, { error: 'not_configured', detail: 'COINSTATS_API_KEY is not set on this Worker. See README.md.' });
