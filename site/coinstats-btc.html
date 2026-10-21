@@ -235,6 +235,8 @@ body.view-simple .adv{ display:none !important; }
           how many sources answered above. This feeds the &ldquo;Volume confirmation&rdquo; check in Trade
           Readiness below; the page&rsquo;s own tracked price and model are unchanged.
         </div>
+        <label class="row" style="margin:10px 0 0;"><input type="checkbox" id="refpMainOn"><span>use this reference price as the main price the page trades on, whenever it is fresh (read within the last 15 seconds) &mdash; falls back to the usual CoinStats price automatically and silently otherwise. If Kalshi&rsquo;s live BRTI (above) is also on and fresh, that takes priority over this, since it is the actual settlement index rather than an approximation of it. The volatility estimate still comes from CoinStats either way; only the price level changes. Off by default.</span></label>
+        <div class="prob-meta" id="refpMainNote" style="margin:4px 0 0;"></div>
       </div>
 
       <div class="card">
@@ -1160,18 +1162,36 @@ function kalshiMainFresh(){
   var age = (Date.now() - kalshiLive.recvAt) + (d.brti.age_ms || 0);
   return age <= KALSHI_MAIN_MAX_AGE_MS ? {value:d.brti.value, age:age} : null;
 }
+var REFP_MAIN_MAX_AGE_MS = 15000;    // 3x refpricePoll's 5s interval -- tolerates one missed poll without falling back
+/* Whether the cross-exchange reference price (refprice-proxy's volume-weighted Coinbase/Kraken/
+   Bitstamp/Gemini/Bullish/itBit average) is currently fresh enough to price off of. Same shape and
+   same strictness policy as kalshiMainFresh above: only a recent, successfully-answered read, never
+   a stale cached one. */
+function refpMainFresh(){
+  if (!$('refpMainOn').checked) return null;
+  if (refp.notConfigured || !refp.data || refp.data.vwap == null) return null;
+  var age = Date.now() - refp.recvAt;
+  return age <= REFP_MAIN_MAX_AGE_MS ? {value:refp.data.vwap, age:age} : null;
+}
 /* The single source of truth for "the current price," used by the odds model, the display, and
    everything else that used to compute cval(latest()) on its own. Ordinarily the CoinStats-derived
    value; when the "use Kalshi as the main price" setting is on AND the live feed is fresh and
-   connected, this substitutes Kalshi's own real-time BRTI instead -- and falls back to the normal
-   value automatically and silently the moment the feed isn't fresh, so a dropped connection degrades
-   to how the page already worked rather than breaking pricing. The realized-volatility model underneath
-   (vol.perSec, the blended candidates) is unaffected either way -- it keeps measuring CoinStats data;
-   only the price LEVEL plugged into the odds formula changes when this is on. */
+   connected, this substitutes Kalshi's own real-time BRTI instead; otherwise, when "use the cross-
+   exchange reference price as the main price" is on AND that feed is fresh, it substitutes the
+   refprice-proxy VWAP. Kalshi's own authenticated real-time BRTI takes priority over the reference
+   price when both are on and both are fresh, since it's the actual index the contract settles
+   against rather than an approximation of it. Either way this falls back to the normal value
+   automatically and silently the moment its chosen feed isn't fresh, so a dropped connection
+   degrades to how the page already worked rather than breaking pricing. The realized-volatility
+   model underneath (vol.perSec, the blended candidates) is unaffected either way -- it keeps
+   measuring CoinStats data; only the price LEVEL plugged into the odds formula changes when either
+   of these is on. */
 function livePrice(){
   var s = latest(), base = s ? cval(s) : null;
   var kx = kalshiMainFresh();
   if (kx) return {value:kx.value, src:'kalshi', age:kx.age};
+  var rp = refpMainFresh();
+  if (rp) return {value:rp.value, src:'refprice', age:rp.age};
   return {value:base, src:'coinstats', age:s ? Date.now() - s.t : null};
 }
 function nowPrice(){ return livePrice().value; }
@@ -1613,6 +1633,15 @@ function kalshiMainNoteText(){
   if (!kalshiLive.data) return 'Falling back to the usual CoinStats price: waiting for the first live reading.';
   if (!kalshiLive.data.connected) return 'Falling back to the usual CoinStats price: the live feed is not connected yet.';
   return 'Falling back to the usual CoinStats price: the live feed\u2019s last reading is too old to trust.';
+}
+function refpMainNoteText(){
+  if (!$('refpMainOn').checked) return '';
+  if (kalshiMainFresh()) return 'Kalshi\u2019s live BRTI (above) is on and fresh, so this is standing by rather than active right now.';
+  var rp = refpMainFresh();
+  if (rp) return '\u2713 Active: pricing off the cross-exchange reference price (' + fmt(rp.value) + ', ' + (rp.age / 1000).toFixed(1) + 's old).';
+  if (refp.notConfigured) return 'Falling back to the usual CoinStats price: could not reach the refprice-proxy Worker.';
+  if (!refp.data) return 'Falling back to the usual CoinStats price: waiting for the first read.';
+  return 'Falling back to the usual CoinStats price: the reference price\u2019s last read is too old to trust.';
 }
 function renderKalshi(){
   var body = $('kalshiBody'), status = $('kalshiStatus'), edgeNote = $('kalshiEdgeNote');
@@ -3274,7 +3303,7 @@ function tick(){
     pl.textContent = c == null ? '\u2014' : fmt(c);
     if (c != null && lastPrice != null && c !== lastPrice){ pl.className = 'price-line ' + (c > lastPrice ? 'up' : 'down'); clearTimeout(flashTimer); flashTimer = setTimeout(function(){ pl.className = 'price-line'; }, 1500); }
     if (c != null) lastPrice = c;
-    $('methodLab').textContent = lp.src === 'kalshi' ? 'Kalshi live BRTI \u00b7 real-time authenticated feed' : METHOD_TEXT[method] + ' \u00b7 ' + n + ' exchange' + (n === 1 ? '' : 's') + (adj ? ' \u00b7 adjusted by ' + sgn(adj) : '');
+    $('methodLab').textContent = lp.src === 'kalshi' ? 'Kalshi live BRTI \u00b7 real-time authenticated feed' : (lp.src === 'refprice' ? 'Cross-exchange reference price \u00b7 ' + (refp.data ? refp.data.sourcesUsed + '/' + refp.data.sourcesTotal + ' exchanges' : '') : METHOD_TEXT[method] + ' \u00b7 ' + n + ' exchange' + (n === 1 ? '' : 's') + (adj ? ' \u00b7 adjusted by ' + sgn(adj) : ''));
     st.textContent = msg && !live ? msg : (!live ? 'Live fetching is off. Last fetch ' + ageText(age) + ' ago.' : (age > Math.max(30000, (currentInterval() || 0) + 10000) ? 'Last fetch ' + ageText(age) + ' ago' + (msg ? '. ' + msg : (currentInterval() ? ' (paused while the tab is hidden, or waiting)' : ' (waiting for the fast window)')) : 'live \u00b7 fetched ' + ageText(age) + ' ago' + (msg ? '. ' + msg : '')));
     var onNow = ageOn(), sumAbs = 0, nAdj = 0;
     Array.prototype.forEach.call(document.querySelectorAll('[data-adj]'), function(td){
@@ -3328,6 +3357,7 @@ function tick(){
   renderKalshi();
   $('kalshiLiveNote').textContent = kalshiLiveNoteText();
   $('kalshiMainNote').textContent = kalshiMainNoteText();
+  $('refpMainNote').textContent = refpMainNoteText();
   renderKh();
   (function(){
     var tw = trackWeights(), names = {}, parts = [];
@@ -4537,6 +4567,8 @@ $('presetMinimal').addEventListener('click', function(){ applyPreset('minimal');
 $('kalshiLiveOn').addEventListener('change', function(){ put('cs_kalshi_live_on_v1', $('kalshiLiveOn').checked ? '1' : '0'); kalshiLive = {data:null, recvAt:0, busy:false, notConfigured:false}; if ($('kalshiLiveOn').checked) kalshiLivePoll(); tick(); });
 $('kalshiMainOn').checked = get('cs_kalshi_main_on_v1', '0') === '1';
 $('kalshiMainOn').addEventListener('change', function(){ put('cs_kalshi_main_on_v1', $('kalshiMainOn').checked ? '1' : '0'); if ($('kalshiMainOn').checked) kalshiLivePoll(); tick(); });
+$('refpMainOn').checked = get('cs_refp_main_on_v1', '0') === '1';
+$('refpMainOn').addEventListener('change', function(){ put('cs_refp_main_on_v1', $('refpMainOn').checked ? '1' : '0'); if ($('refpMainOn').checked) refpricePoll(); tick(); });
 $('kalshiBlockOn').checked = get('cs_kalshi_block_v1', '0') === '1';
 $('kalshiMinEdge').value = get('cs_kalshi_minedge_v1', '4');
 $('kalshiOn').addEventListener('change', function(){ put('cs_kalshi_on_v1', $('kalshiOn').checked ? '1' : '0'); kalshi.pausedUntil = 0; kalshi.lastStart = 0; kalshi.msg = ''; if ($('kalshiOn').checked) kalshiPoll(); tick(); });
