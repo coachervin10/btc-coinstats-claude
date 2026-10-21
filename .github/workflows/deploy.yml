@@ -152,7 +152,12 @@ jobs:
         id: coinbase_secrets
         env:
           COINBASE_CDP_KEY_NAME: ${{ secrets.COINBASE_CDP_KEY_NAME }}
-        run: echo "configured=$([ -n \"$COINBASE_CDP_KEY_NAME\" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ -n "$COINBASE_CDP_KEY_NAME" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Upload Coinbase API key secrets, once you've added them
         if: steps.coinbase_secrets.outputs.configured == 'true'
         uses: cloudflare/wrangler-action@v3
