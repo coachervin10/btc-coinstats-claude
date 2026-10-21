@@ -1,10 +1,19 @@
 /**
- * coinbase-balance-proxy -- a READ-ONLY view of your real Coinbase account balances, for display
- * next to the paper-trading tracker. This Worker can never place an order, withdraw, or move
- * funds: it only ever calls Coinbase's GET /accounts endpoint, and it only works at all if the API
- * key you give it has the "View" permission -- if you also granted it Trade or Transfer, that's a
- * choice made in Coinbase's own key-creation screen, not something this code can do anything with,
- * since it never calls any endpoint but the one below.
+ * coinbase-balance-proxy -- a READ-ONLY view of your real Coinbase cash balance, for display next
+ * to the paper-trading tracker. This Worker can never place an order, withdraw, or move funds: it
+ * only ever calls Coinbase's GET /portfolios and GET /portfolios/{uuid} endpoints (both read-only
+ * by nature), and it only works at all if the API key you give it has the "View" permission -- if
+ * you also granted it Trade or Transfer, that's a choice made in Coinbase's own key-creation
+ * screen, not something this code can do anything with, since it never calls any endpoint but the
+ * two below.
+ *
+ * Why portfolio breakdown, not the plain GET /accounts wallet list: Coinbase's prediction markets
+ * (Kalshi contracts, hosted inside the Coinbase app) don't show up as their own currency "account"
+ * -- querying /accounts for a user actively trading them can come back with nothing but unrelated
+ * crypto dust and no cash account at all, even though real USD cash is sitting in the app. The
+ * portfolio breakdown's `total_cash_equivalent_balance` is the one number that reflects actual
+ * spendable cash across the whole portfolio -- crypto, equities, and prediction-market activity
+ * included -- which is what "cash available" means here.
  *
  * Auth: Coinbase Developer Platform (CDP) API keys, authenticated with a short-lived JWT (RFC
  * 7519 / JWS) signed with your key's private key -- see
@@ -24,7 +33,7 @@
  *
  * Route:
  *   GET /api/accounts -> { payload: {
- *     ok, accounts: [{ currency, name, available, hold, uuid }], fetched_at
+ *     ok, cash: { value, currency }, fetched_at
  *   } }
  *   or, if the two secrets above aren't set yet: { payload: { ok:false, reason:'not_configured' } }
  */
@@ -145,8 +154,8 @@ async function buildJwt(keyName, privateKeySecret, method, host, path) {
   return signingInput + '.' + b64url(sigBuf);
 }
 
-async function fetchAccounts(env) {
-  const host = 'api.coinbase.com', path = '/api/v3/brokerage/accounts';
+async function cbGet(env, path) {
+  const host = 'api.coinbase.com';
   const jwt = await buildJwt(env.COINBASE_CDP_KEY_NAME, env.COINBASE_CDP_PRIVATE_KEY, 'GET', host, path);
   const ctl = new AbortController();
   const timer = setTimeout(function () { ctl.abort(); }, 6000);
@@ -156,22 +165,33 @@ async function fetchAccounts(env) {
       signal: ctl.signal,
     });
     const body = await res.json().catch(function () { return null; });
-    if (!res.ok || !body || !Array.isArray(body.accounts)) {
+    if (!res.ok || !body) {
       throw new Error('Coinbase answered HTTP ' + res.status + (body && body.error ? ': ' + JSON.stringify(body.error) : ''));
     }
-    return body.accounts
-      .map(function (a) {
-        const avail = a.available_balance ? Number(a.available_balance.value) : null;
-        const hold = a.hold ? Number(a.hold.value) : null;
-        return { currency: a.currency, name: a.name || a.currency, available: avail, hold: hold, uuid: a.uuid };
-      })
-      .filter(function (a) { return (a.available || 0) > 0 || (a.hold || 0) > 0; });
+    return body;
   } catch (e) {
     if (e && e.name === 'AbortError') throw new Error('Coinbase did not answer within 6 seconds.');
     throw e;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/* Sums total_cash_equivalent_balance across every non-deleted portfolio. Almost everyone has
+   exactly one (a single "DEFAULT" portfolio holds crypto, equities, and prediction-market
+   activity together, per Coinbase's own description of how the feature works), but summing
+   handles the rare case of more than one without having to guess which one is "the" portfolio. */
+async function fetchCash(env) {
+  const list = await cbGet(env, '/api/v3/brokerage/portfolios');
+  const portfolios = Array.isArray(list.portfolios) ? list.portfolios.filter(function (p) { return !p.deleted; }) : [];
+  if (!portfolios.length) throw new Error('Coinbase returned no portfolios for this account.');
+  let total = 0, currency = 'USD';
+  for (const p of portfolios) {
+    const detail = await cbGet(env, '/api/v3/brokerage/portfolios/' + encodeURIComponent(p.uuid));
+    const bal = detail.breakdown && detail.breakdown.portfolio_balances && detail.breakdown.portfolio_balances.total_cash_equivalent_balance;
+    if (bal) { total += Number(bal.value) || 0; currency = bal.currency || currency; }
+  }
+  return { value: Math.round(total * 100) / 100, currency: currency };
 }
 
 export default {
@@ -186,8 +206,8 @@ export default {
     }
 
     try {
-      const accounts = await fetchAccounts(env);
-      return json(200, { payload: { ok: true, accounts: accounts, fetched_at: new Date().toISOString() } }, 20);
+      const cash = await fetchCash(env);
+      return json(200, { payload: { ok: true, cash: cash, fetched_at: new Date().toISOString() } }, 20);
     } catch (e) {
       return json(502, { payload: { ok: false, reason: 'upstream_error', detail: String((e && e.message) || e) } });
     }

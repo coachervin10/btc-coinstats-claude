@@ -265,12 +265,21 @@ the option it came from, converted to the same "per 5 minutes" scale used elsewh
 degrades silently to nothing shown if Deribit's options data doesn't parse (e.g. no live option at
 least 20 hours from expiry).
 
-## Real Coinbase account balances (read-only, optional)
+## Real Coinbase cash balance (read-only, optional)
 
-A new `coinbase-balance-proxy` Worker shows your actual Coinbase account balances next to the
-paper account, purely for reference -- it is architecturally incapable of placing an order or
-moving funds. It only ever calls Coinbase's `GET /accounts` endpoint, nothing else, so there is no
-code path in this Worker that could trade or withdraw even if you wanted it to.
+A new `coinbase-balance-proxy` Worker shows your actual Coinbase cash balance next to the paper
+account, purely for reference -- it is architecturally incapable of placing an order or moving
+funds. It only ever calls Coinbase's read-only `GET /portfolios` and `GET /portfolios/{uuid}`
+endpoints, nothing else, so there is no code path in this Worker that could trade or withdraw even
+if you wanted it to.
+
+It deliberately does **not** use Coinbase's plain `GET /accounts` wallet list. That endpoint only
+shows balances held in individual currency "accounts" (BTC, USDC, random dust tokens, etc), and for
+someone actively trading Coinbase's prediction markets (Kalshi's contracts, hosted inside the
+Coinbase app) it can come back with nothing but unrelated crypto and no cash account at all, even
+though real cash is sitting in the app. Instead this reads the portfolio-level
+`total_cash_equivalent_balance` -- the one number that reflects real spendable cash across the
+whole account, prediction-market activity included -- and ignores every individual crypto holding.
 
 **Setup (optional -- everything else on this page works without it):**
 
@@ -292,12 +301,14 @@ code path in this Worker that could trade or withdraw even if you wanted it to.
    Claude or anyone else.
 5. Push to `main` (or re-run the workflow) so the new `deploy-coinbase-balance-proxy` job picks up
    the secrets.
-6. On the page, check "show my real Coinbase account balances here" in the new "Coinbase account
+6. On the page, check "show my real Coinbase cash balance here" in the new "Coinbase cash balance
    (read-only)" card.
 
 Until you do this, the Worker deploys fine and the card just says "Not set up yet" -- nothing
-breaks, nothing is required. The balances shown are read-only and refresh every 60 seconds; they
-are never read by any sizing, odds, or auto-trading logic elsewhere on the page.
+breaks, nothing is required. The balance shown is read-only and refreshes every 60 seconds; it is
+never read by any sizing, odds, or auto-trading logic elsewhere on the page -- except if you
+explicitly click "Set balance from Coinbase cash" in Paper trading, which copies that one number
+into the paper account's starting balance (still fake money; no real funds move).
 
 ## How cross-device sync works
 

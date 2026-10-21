@@ -429,7 +429,7 @@ body.view-simple .adv{ display:none !important; }
 
       <div class="card">
         <h2>Coinbase cash balance (read-only)</h2>
-        <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="useCoinbaseAcct"><span>show my real Coinbase cash balance here (USD/USDC/USDT only, not BTC or other crypto holdings), for reference only &mdash; this page can never place an order or move funds, no matter what permissions the API key has. Give the key only the &ldquo;View&rdquo; permission in Coinbase's own key-creation screen (leave Trade, Transfer and Receive unchecked) and it becomes physically incapable of trading or withdrawing, independent of this page's code. Off by default.</span></label>
+        <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="useCoinbaseAcct"><span>show my real Coinbase cash balance here &mdash; the actual spendable cash across your whole portfolio, including prediction-markets activity, not a BTC or other crypto holding. For reference only: this page can never place an order or move funds, no matter what permissions the API key has. Give the key only the &ldquo;View&rdquo; permission in Coinbase's own key-creation screen (leave Trade, Transfer and Receive unchecked) and it becomes physically incapable of trading or withdrawing, independent of this page's code. Off by default.</span></label>
         <div id="coinbaseAcctBody" class="prob-meta">Off.</div>
       </div>
 
@@ -1853,15 +1853,12 @@ function deribitIvPer5(){
    no account to show), and degrades to a quiet "not set up" message rather than an error if the
    Worker's two secrets haven't been configured yet -- see that Worker's wrangler.toml. */
 var coinbaseAcct = {data:null, busy:false, fails:0, recvAt:0, notConfigured:false, error:null};
-/* "Cash" here means USD/USDC/USDT only, not BTC or other crypto holdings -- both the card below
-   and the "set paper balance from Coinbase cash" button filter to just these, on purpose: this
-   page is a BTC price-direction tracker, so a real BTC balance sitting in the same account isn't
-   spendable bankroll in the same sense cash is, and showing it alongside cash invites confusing
-   the two. */
-var CASH_CURRENCIES = ['USD', 'USDC', 'USDT'];
-function coinbaseCashAccounts(){
-  return coinbaseAcct.data ? coinbaseAcct.data.filter(function(a){ return CASH_CURRENCIES.indexOf(a.currency) !== -1; }) : null;
-}
+/* coinbaseAcct.data is { value, currency } -- real spendable cash across the whole Coinbase
+   portfolio (crypto, equities, and prediction-market/Kalshi activity included), NOT a sum of
+   individual currency wallets. The plain GET /accounts wallet list doesn't reliably show a cash
+   balance at all for someone actively trading Coinbase's prediction markets -- it can come back
+   with nothing but unrelated crypto dust -- so this reads the portfolio-level
+   total_cash_equivalent_balance instead; see coinbase-balance-proxy/src/worker.js for why. */
 var COINBASE_ACCT_EVERY_MS = 60000;
 async function coinbaseAcctPoll(){
   if (sessionClosed || coinbaseAcct.busy || document.hidden || !$('useCoinbaseAcct').checked) return;
@@ -1870,13 +1867,13 @@ async function coinbaseAcctPoll(){
   try {
     var res = await callApi('coinbaseAcct', 'get-accounts', {});
     var d = res && res.payload;
-    if (d && d.ok && Array.isArray(d.accounts)){
-      coinbaseAcct.data = d.accounts; coinbaseAcct.recvAt = Date.now(); coinbaseAcct.fails = 0;
+    if (d && d.ok && d.cash && typeof d.cash.value === 'number'){
+      coinbaseAcct.data = d.cash; coinbaseAcct.recvAt = Date.now(); coinbaseAcct.fails = 0;
       coinbaseAcct.notConfigured = false; coinbaseAcct.error = null;
     } else if (d && d.reason === 'not_configured'){
       coinbaseAcct.notConfigured = true; coinbaseAcct.error = null;
     } else {
-      coinbaseAcct.error = (d && d.detail) || 'Coinbase did not return a usable account list.';
+      coinbaseAcct.error = (d && d.detail) || 'Coinbase did not return a usable cash balance.';
     }
   } catch (e) {
     coinbaseAcct.fails++;
@@ -1890,16 +1887,12 @@ function renderCoinbaseAcct(){
   var el = $('coinbaseAcctBody');
   if (!el) return;
   if (!$('useCoinbaseAcct').checked){ el.textContent = 'Off.'; return; }
-  if (coinbaseAcct.notConfigured){ el.textContent = 'Not set up yet — add the two API-key secrets to coinbase-balance-proxy (see README) to show your real balances here.'; return; }
+  if (coinbaseAcct.notConfigured){ el.textContent = 'Not set up yet — add the two API-key secrets to coinbase-balance-proxy (see README) to show your real balance here.'; return; }
   if (coinbaseAcct.error && !coinbaseAcct.data){ el.textContent = 'Could not reach Coinbase: ' + coinbaseAcct.error; return; }
   if (!coinbaseAcct.data){ el.textContent = 'Loading…'; return; }
-  var cash = coinbaseCashAccounts();
-  if (!cash.length){ el.textContent = 'Connected — no USD/USDC/USDT cash balance on this account.'; return; }
-  el.innerHTML = cash.map(function(a){
-    var amt = a.available != null ? a.available : 0, hold = a.hold || 0;
-    return '<div class="row" style="justify-content:space-between;"><span>' + a.currency + '</span><span>' +
-      amt.toLocaleString(undefined, {maximumFractionDigits:8}) + (hold ? ' (+' + hold.toLocaleString(undefined, {maximumFractionDigits:8}) + ' held)' : '') + '</span></div>';
-  }).join('');
+  var cash = coinbaseAcct.data;
+  el.innerHTML = '<div class="row" style="justify-content:space-between;"><span>Cash available</span><span>' +
+    money(cash.value) + (cash.currency && cash.currency !== 'USD' ? ' ' + cash.currency : '') + '</span></div>';
 }
 /* Volume trend over the last ~60s: how much total cross-exchange 24h volume rose (or fell) since
    the oldest sample still within that window. A rising total means fresh trading activity is
@@ -5087,22 +5080,16 @@ $('reset').addEventListener('click', function(){
   paper = {balance:1000, bets:[]}; savePaper(); renderLedger(); $('betMsg').textContent = 'Paper account reset to $1,000.';
 });
 /* Sets the PAPER balance to match real cash on hand in the connected Coinbase account -- a
-   number only, never a real transfer. Every bet placed afterward is still 100% simulated.
-   CASH_CURRENCIES / coinbaseCashAccounts() are defined above, next to the coinbaseAcct state. */
-function coinbaseCashTotal(){
-  var cash = coinbaseCashAccounts();
-  if (cash == null) return null;
-  return cash.reduce(function(a, x){ return a + (x.available || 0); }, 0);
-}
+   number only, never a real transfer. Every bet placed afterward is still 100% simulated. */
 var syncBalTimer = null;
 $('syncCoinbaseBalance').addEventListener('click', function(){
   var b = $('syncCoinbaseBalance'), note = $('syncCoinbaseNote');
   if (!$('useCoinbaseAcct').checked || coinbaseAcct.notConfigured){
-    note.textContent = 'Turn on and set up the Coinbase account card above first.'; return;
+    note.textContent = 'Turn on and set up the Coinbase cash card above first.'; return;
   }
-  var cash = coinbaseCashTotal();
-  if (cash == null){ note.textContent = 'Still loading your Coinbase balances -- try again in a few seconds.'; return; }
-  if (cash <= 0){ note.textContent = 'No USD/USDC/USDT cash found in that account (' + money(cash) + ').'; return; }
+  if (!coinbaseAcct.data){ note.textContent = 'Still loading your Coinbase cash balance -- try again in a few seconds.'; return; }
+  var cash = coinbaseAcct.data.value;
+  if (cash <= 0){ note.textContent = 'No cash found in that account (' + money(cash) + ').'; return; }
   if (!syncBalTimer){
     b.textContent = 'Click again to set paper balance to ' + money(cash);
     syncBalTimer = setTimeout(function(){ syncBalTimer = null; b.textContent = 'Set balance from Coinbase cash'; }, 4000);
@@ -5110,7 +5097,7 @@ $('syncCoinbaseBalance').addEventListener('click', function(){
   }
   clearTimeout(syncBalTimer); syncBalTimer = null; b.textContent = 'Set balance from Coinbase cash';
   paper = {balance:cash, bets:[]}; savePaper(); renderLedger();
-  note.textContent = 'Paper balance set to ' + money(cash) + ', matching your real USD/USDC/USDT cash as of the last Coinbase refresh. Still fake money -- no real funds moved.';
+  note.textContent = 'Paper balance set to ' + money(cash) + ', matching your real Coinbase cash as of the last refresh. Still fake money -- no real funds moved.';
 });
 setInterval(function(){ if (!document.hidden && $('live').checked && (!vol || Date.now() - vol.at > chartEvery())) refreshChart(); }, 15000);
 
