@@ -423,6 +423,8 @@ body.view-simple .adv{ display:none !important; }
           your strike for the next window. If you didn't bet that window, type your strike yourself. Fake money, real logic.
         </div>
         <button type="button" class="mini" id="reset" style="margin-top:10px;">Reset paper account</button>
+        <button type="button" class="mini" id="syncCoinbaseBalance" style="margin-top:10px; margin-left:8px;">Set balance from Coinbase cash</button>
+        <div class="prob-meta" id="syncCoinbaseNote" style="margin-top:6px;"></div>
       </div>
 
       <div class="card">
@@ -5073,6 +5075,35 @@ $('reset').addEventListener('click', function(){
   if (!resetTimer){ b.textContent = 'Click again to reset the paper account'; resetTimer = setTimeout(function(){ resetTimer = null; b.textContent = 'Reset paper account'; }, 4000); return; }
   clearTimeout(resetTimer); resetTimer = null; b.textContent = 'Reset paper account';
   paper = {balance:1000, bets:[]}; savePaper(); renderLedger(); $('betMsg').textContent = 'Paper account reset to $1,000.';
+});
+/* Sets the PAPER balance to match real cash on hand in the connected Coinbase account -- a
+   number only, never a real transfer. "Cash" here means USD/USDC/USDT balances (not BTC or
+   other crypto holdings), since those are the stable, spendable amounts a real version of this
+   bankroll would actually be sized from. Every bet placed afterward is still 100% simulated. */
+var CASH_CURRENCIES = ['USD', 'USDC', 'USDT'];
+function coinbaseCashTotal(){
+  if (!coinbaseAcct.data) return null;
+  return coinbaseAcct.data
+    .filter(function(a){ return CASH_CURRENCIES.indexOf(a.currency) !== -1; })
+    .reduce(function(a, x){ return a + (x.available || 0); }, 0);
+}
+var syncBalTimer = null;
+$('syncCoinbaseBalance').addEventListener('click', function(){
+  var b = $('syncCoinbaseBalance'), note = $('syncCoinbaseNote');
+  if (!$('useCoinbaseAcct').checked || coinbaseAcct.notConfigured){
+    note.textContent = 'Turn on and set up the Coinbase account card above first.'; return;
+  }
+  var cash = coinbaseCashTotal();
+  if (cash == null){ note.textContent = 'Still loading your Coinbase balances -- try again in a few seconds.'; return; }
+  if (cash <= 0){ note.textContent = 'No USD/USDC/USDT cash found in that account (' + money(cash) + ').'; return; }
+  if (!syncBalTimer){
+    b.textContent = 'Click again to set paper balance to ' + money(cash);
+    syncBalTimer = setTimeout(function(){ syncBalTimer = null; b.textContent = 'Set balance from Coinbase cash'; }, 4000);
+    return;
+  }
+  clearTimeout(syncBalTimer); syncBalTimer = null; b.textContent = 'Set balance from Coinbase cash';
+  paper = {balance:cash, bets:[]}; savePaper(); renderLedger();
+  note.textContent = 'Paper balance set to ' + money(cash) + ', matching your real USD/USDC/USDT cash as of the last Coinbase refresh. Still fake money -- no real funds moved.';
 });
 setInterval(function(){ if (!document.hidden && $('live').checked && (!vol || Date.now() - vol.at > chartEvery())) refreshChart(); }, 15000);
 
