@@ -49,13 +49,12 @@ function randomNonce() {
   return Array.from(bytes).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
 }
 
-/* PEM -> the raw DER bytes PKCS8 import needs. Coinbase hands out either a PKCS8
-   "-----BEGIN PRIVATE KEY-----" block (importable directly) or a SEC1 EC
-   "-----BEGIN EC PRIVATE KEY-----" block (Web Crypto can't import SEC1 directly). This repo only
-   supports the PKCS8 form, which is what the CDP portal issues for new keys as of this writing --
-   if Coinbase ever hands you a SEC1 key instead, it needs converting to PKCS8 first
-   (e.g. `openssl pkcs8 -topk8 -nocrypt`) before it'll work here. */
-function pemToDer(pem) {
+/* PEM -> raw DER bytes. Coinbase's CDP portal hands out a PEM headed "-----BEGIN EC PRIVATE
+   KEY-----" (SEC1, OpenSSL's "EC private key" format), not "-----BEGIN PRIVATE KEY-----"
+   (PKCS8) -- but Web Crypto's importKey only accepts PKCS8 for ECDSA, so the SEC1 body is
+   re-wrapped into a PKCS8 PrivateKeyInfo below before import. A PKCS8 PEM, if you ever have one,
+   is detected by its header and passed through unwrapped. */
+function pemBody(pem) {
   const body = pem.replace(/-----BEGIN[^-]+-----/, '').replace(/-----END[^-]+-----/, '').replace(/\s+/g, '');
   const bin = atob(body);
   const bytes = new Uint8Array(bin.length);
@@ -63,8 +62,34 @@ function pemToDer(pem) {
   return bytes;
 }
 
+function derLen(n) {
+  if (n < 128) return [n];
+  const bytes = [];
+  let v = n;
+  while (v > 0) { bytes.unshift(v & 0xff); v = v >>> 8; }
+  return [0x80 | bytes.length].concat(bytes);
+}
+
+/* Wraps a SEC1 ECPrivateKey DER blob (RFC 5915) in the fixed PKCS8 PrivateKeyInfo structure
+   (RFC 5958) Web Crypto requires: version 0, the P-256 (prime256v1, OID 1.2.840.10045.3.1.7)
+   AlgorithmIdentifier for id-ecPublicKey (OID 1.2.840.10045.2.1), then the SEC1 bytes verbatim
+   inside an OCTET STRING. Verified against a locally generated test key before shipping: the
+   resulting key imports, and signs/verifies correctly end to end, even though its raw DER bytes
+   don't byte-for-byte match a reference PKCS8 export (optional fields can differ; the signature
+   math is what was checked). */
+function sec1ToPkcs8(sec1) {
+  const algId = [0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+  const version = [0x02, 0x01, 0x00];
+  const octetHeader = [0x04].concat(derLen(sec1.length));
+  const body = version.concat(algId, octetHeader, Array.from(sec1));
+  const outer = [0x30].concat(derLen(body.length), body);
+  return new Uint8Array(outer);
+}
+
 async function importSigningKey(pem) {
-  const der = pemToDer(pem);
+  const isSec1 = /BEGIN EC PRIVATE KEY/.test(pem);
+  const bytes = pemBody(pem);
+  const der = isSec1 ? sec1ToPkcs8(bytes) : bytes;
   return crypto.subtle.importKey('pkcs8', der, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
 }
 
