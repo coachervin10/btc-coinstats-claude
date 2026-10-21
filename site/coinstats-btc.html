@@ -1637,13 +1637,20 @@ function kalshiForWindow(E){
    workers/kalshi-btc15/src/worker.js, parseBook()), so only the two bid ladders carry anything new; the asks
    are skipped here to avoid double-counting. Polled at the same cadence as kalshiPoll (kalshiEvery), through
    the same public, read-only, no-token REST route. */
-var KALSHI_BOOK_MAX_AGE_MS = 20000;
+/* Polled on its own fixed, slower cadence (not kalshiEvery) -- a resting-order imbalance doesn't
+   need sub-10-second freshness the way the live price does, and Kalshi's orderbook endpoint turns
+   out to carry a much tighter (and undocumented -- Kalshi's published token-bucket limits are for
+   authenticated traffic, and this reads the same public, no-key route /api/market already uses)
+   anonymous rate limit than /api/market does: live testing hit sustained HTTP 429s on this
+   endpoint even with the server-side cache in place. Keeping this page's own request rate low is
+   the one lever available here. */
+var KALSHI_BOOK_MAX_AGE_MS = 30000, KALSHI_BOOK_EVERY_MS = 20000;
 var kalshiBook = {b:null, recvAt:0, lastStart:0, busy:false, fails:0, msg:'', pausedUntil:0};
 async function kalshiBookPoll(){
   if (sessionClosed || kalshiBook.busy || document.hidden || !$('kalshiOn').checked) return;
   var now = Date.now();
   if (now < kalshiBook.pausedUntil) return;
-  if (now - kalshiBook.lastStart < (+$('kalshiEvery').value || 3) * 1000) return;
+  if (now - kalshiBook.lastStart < KALSHI_BOOK_EVERY_MS) return;
   kalshiBook.busy = true; kalshiBook.lastStart = now;
   try {
     var res = await callApi(KALSHI_SERVER, 'get_btc15_orderbook', {depth:5});
