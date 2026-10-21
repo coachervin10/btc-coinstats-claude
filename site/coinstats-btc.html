@@ -190,6 +190,8 @@ body.view-simple .adv{ display:none !important; }
           <select id="newsLookback" aria-label="Lookback window in minutes for counting qualifying articles"><option value="15">15 min</option><option value="30" selected>30 min</option><option value="45">45 min</option><option value="60">60 min</option></select>
         </div>
         <div class="prob-meta" id="autoNewsNote" style="margin-bottom:8px;"></div>
+        <label class="row" style="margin:0 0 6px;"><input type="checkbox" id="autoTodOn"><span>automatically widen the odds a little (volatility &times; 1.25) in the US equity open/close windows, where BTC has reliably moved faster</span></label>
+        <div class="prob-meta" id="autoTodNote" style="margin-bottom:8px;"></div>
         <div class="target-row" style="margin:0 0 8px;">
           <label for="volSpeed" class="prob-meta">Volatility reading</label>
           <select id="volSpeed" aria-label="How quickly the volatility estimate reacts">
@@ -1438,6 +1440,11 @@ function updateShortVol(){
 var cdc = {book:null, trades:null, candles:null, candles1:null, candles1At:0, candles15:null, candles30:null, candlesAt:0, basis:null, funding:null, oi:null, msg:'', busy:false, fails:0};
 var basisHist = [];
 var fundingHist = [];
+/* Signed funding-rate history (level, not magnitude -- fundingHist above only keeps |rate| for
+   scaling the level reading), kept so a fast SWING in funding can be read separately from the
+   level: a rate that is climbing quickly often front-runs a squeeze faster than the level itself
+   does. Same {t, v} / KEEP_MS pattern as oiHist below. */
+var fundingSeries = [], FUNDING_SERIES_KEEP_MS = 20 * 60000, FUNDING_MOM_LOOKBACK_MS = 10 * 60000;
 /* Open interest history (BTCUSD-PERP), kept so "is OI rising or falling" can be read off a recent
    window rather than one noisy instant-to-instant comparison. */
 var oiHist = [], OI_KEEP_MS = 20 * 60000;
@@ -1911,6 +1918,17 @@ function deribitIvPer5(){
   var per5 = (annualPct / 100) * Math.sqrt(5 / (365 * 24 * 60));
   return {per5pct:per5 * 100, days:deribitIv.data.days_to_expiry, annualPct:annualPct};
 }
+/* 25-delta risk reversal: unlike the ATM IV level above (which only says how big a move the options
+   market expects), this says which DIRECTION it's bracing for -- positive skew means 25-delta puts
+   are pricier than 25-delta calls (paying up for downside protection, a "fear" skew), so the lean
+   here runs the opposite way. 10 vol points of skew (a genuinely large reading for a short-dated
+   BTC option) maps to a full-strength lean; this is this page's own choice of scale, not something
+   Deribit or Black-Scholes defines. */
+function deribitSkewLean(){
+  if (!$('useDeribitIv').checked || !deribitIv.data || deribitIv.data.skew_25d == null) return null;
+  var skew = deribitIv.data.skew_25d;
+  return {skew:skew, lean:clamp(-skew / 10, -1, 1)};
+}
 /* Read-only view of your real Coinbase account balances, via coinbase-balance-proxy. This never
    feeds the model or places any order -- it's a reference card only, so you can see your actual
    holdings next to the paper account without leaving the page. Off by default (no secrets means
@@ -2219,6 +2237,38 @@ function newsNoteText(){
   return txt;
 }
 
+/* ---------- auto time-of-day window: widen the odds a little around US equity open/close ----------
+   A recurring, weekday-only effect (BTC has reliably shown faster short-term moves in these two
+   windows), not a rare spike like the news burst above, so a more modest multiplier. Computed
+   straight from the clock in America/New_York, which stays correct across DST without any special
+   casing here -- no polling, no data feed, nothing that can go stale or fail to reach a server. */
+var TOD_MULT = 1.25;
+var TOD_WINDOWS = [
+  {startMin:9 * 60 + 30, endMin:10 * 60, label:'the US equity open (9:30\u201310:00am ET)'},
+  {startMin:15 * 60 + 45, endMin:16 * 60, label:'the US equity close (3:45\u20134:00pm ET)'}
+];
+function nyNowParts(){
+  var fmt = new Intl.DateTimeFormat('en-US', {timeZone:'America/New_York', hourCycle:'h23', hour:'2-digit', minute:'2-digit', weekday:'short'});
+  var h = 0, m = 0, wd = '';
+  fmt.formatToParts(new Date()).forEach(function(p){ if (p.type === 'hour') h = +p.value; else if (p.type === 'minute') m = +p.value; else if (p.type === 'weekday') wd = p.value; });
+  return {min:h * 60 + m, weekday:wd};
+}
+function todWindowNow(){
+  var now = nyNowParts();
+  if (now.weekday === 'Sat' || now.weekday === 'Sun') return null;
+  for (var i = 0; i < TOD_WINDOWS.length; i++){
+    var w = TOD_WINDOWS[i];
+    if (now.min >= w.startMin && now.min < w.endMin) return w;
+  }
+  return null;
+}
+function todActive(){ return $('autoTodOn').checked && !!todWindowNow(); }
+function todNoteText(){
+  if (!$('autoTodOn').checked) return 'Auto time-of-day window is off.';
+  var w = todWindowNow();
+  return w ? ('\u26a0 Active: inside ' + w.label + ' \u2014 widening the odds \u00d7' + TOD_MULT + '.') : 'Outside the US equity open/close windows right now.';
+}
+
 function parseCandles(o){ return ((o && o.data) || []).map(function(c){ return {open:+c.open, high:+c.high, low:+c.low, close:+c.close, volume:+c.volume, ts:Date.parse(c.timestamp)}; }).sort(function(a, b){ return a.ts - b.ts; }); }
 async function cdcPoll(){
   if (sessionClosed || cdc.busy || document.hidden || !$('useCdc').checked) return;
@@ -2248,7 +2298,10 @@ async function cdcPoll(){
     tapeAdd(cdc.trades);
     updateCvd(cdc.trades);
     var fr = out.funding && out.funding.payload;
-    if (fr && (fr.fundingRate != null || fr.estimatedFundingRate != null)) cdc.funding = {fundingRate:fr.fundingRate, estimatedFundingRate:fr.estimatedFundingRate, at:now};
+    if (fr && (fr.fundingRate != null || fr.estimatedFundingRate != null)){
+      cdc.funding = {fundingRate:fr.fundingRate, estimatedFundingRate:fr.estimatedFundingRate, at:now};
+      if (fr.fundingRate != null){ fundingSeries.push({t:now, v:fr.fundingRate}); fundingSeries = fundingSeries.filter(function(x){ return now - x.t <= FUNDING_SERIES_KEEP_MS; }); }
+    }
     var oiR = readNumber(out.oi, 'openInterest');
     if (oiR > 0){ cdc.oi = {value:oiR, at:now}; oiHist.push({t:now, v:oiR}); oiHist = oiHist.filter(function(x){ return now - x.t <= OI_KEEP_MS; }); }
     if (need1 && out.c1){ var cd1 = readObj(out.c1, 'data'); if (cd1){ cdc.candles1 = parseCandles(cd1); cdc.candles1At = now; } }
@@ -2283,7 +2336,7 @@ function cdcSignals(){
   var flowLean = (buy + sell) ? (buy - sell) / (buy + sell) : 0;
   var out = {obLean:obLean, flowLean:flowLean, bidV:bidV, askV:askV, buy:buy, sell:sell, volRatio:null, volLean:0, spike:false,
              vol15Ratio:null, vol15Lean:0, obvShare:null, obvLean:0, vwap:null, vwapDev:null, vwapLean:0,
-             fundingRate:null, estFundingRate:null, fundingLean:0, oi:null, oiChangePct:null, oiLean:0};
+             fundingRate:null, estFundingRate:null, fundingLean:0, fundingDelta:null, fundingMomLean:0, oi:null, oiChangePct:null, oiLean:0};
   var cs = (cdc.candles || []).filter(function(c){ return c.ts + 300000 <= now; });
   if (cs.length >= 21){
     var lastC = cs[cs.length - 1], prev = cs.slice(-21, -1), avg = prev.reduce(function(a, c){ return a + c.volume; }, 0) / prev.length;
@@ -2333,6 +2386,20 @@ function cdcSignals(){
     var fAvgAbs = fundingHist.length ? fundingHist.reduce(function(a, x){ return a + x; }, 0) / fundingHist.length : Math.abs(cdc.funding.fundingRate);
     out.fundingRate = cdc.funding.fundingRate; out.estFundingRate = cdc.funding.estimatedFundingRate;
     out.fundingLean = clamp(-cdc.funding.fundingRate / (Math.max(fAvgAbs, 1e-6) * 2), -1, 1);
+    /* Momentum: how fast funding has swung over the last ~10 minutes, read separately from the level
+       above -- a rate climbing quickly toward longs-pay-more often front-runs a squeeze before the
+       level itself looks extreme. Same crowding logic, same against-the-direction sign; scaled
+       against this page's own recent swing sizes rather than a guessed fixed number. */
+    var fBase = null;
+    for (var fsI = 0; fsI < fundingSeries.length; fsI++){ if (now - fundingSeries[fsI].t <= FUNDING_MOM_LOOKBACK_MS){ fBase = fundingSeries[fsI]; break; } }
+    if (fBase && fBase.t !== now){
+      var fDelta = cdc.funding.fundingRate - fBase.v;
+      var fDeltaHist = [];
+      for (var fdI = 1; fdI < fundingSeries.length; fdI++) fDeltaHist.push(Math.abs(fundingSeries[fdI].v - fundingSeries[fdI - 1].v));
+      var fDeltaAvg = fDeltaHist.length ? fDeltaHist.reduce(function(a, x){ return a + x; }, 0) / fDeltaHist.length : Math.abs(fDelta);
+      out.fundingDelta = fDelta;
+      out.fundingMomLean = clamp(-fDelta / (Math.max(fDeltaAvg, 1e-7) * 4), -1, 1);
+    }
   }
   /* Open interest, rising or falling over the last 5 minutes, read together with price direction over
      the same stretch -- price up with OI up is new money confirming the move; price up with OI down
@@ -2427,6 +2494,26 @@ function stdPop(a, period, idx){
   var m = sma(a, period, idx); if (m === null) return null;
   var t = 0; for (var i = idx - period + 1; i <= idx; i++) t += (a[i] - m) * (a[i] - m);
   return Math.sqrt(t / period);
+}
+/* ATR(14) on candles -- a plain (not Wilder-smoothed) average of true range over the last 14 bars,
+   consistent with the simple averages used elsewhere on this page (sma, Bollinger). Informational
+   only: a normalizer for "is this candle's move big or small for this window", not a directional
+   lean, so it is shown next to the volatility readout rather than pushed into the momentum table. */
+function atr(candles, period){
+  if (!candles || candles.length < period + 1) return null;
+  var trs = [];
+  for (var i = candles.length - period; i < candles.length; i++){
+    var c = candles[i], prevClose = candles[i - 1].close;
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose)));
+  }
+  return trs.reduce(function(a, x){ return a + x; }, 0) / trs.length;
+}
+function atr1mReading(){
+  if (!$('useCdc').checked || !cdc.candles1 || cdc.candles1.length < 15) return null;
+  var v = atr(cdc.candles1, 14);
+  if (v == null) return null;
+  var last = cdc.candles1[cdc.candles1.length - 1].close;
+  return {usd:v, pct:last > 0 ? v / last : null};
 }
 /* 15-minute bars joined from the 5-minute chart points: each bar takes the three points up to its close, opens at the
    previous close, and uses the highest and lowest of those points for its range (so highs and lows are approximate). */
@@ -2587,6 +2674,11 @@ function computeMomentumRaw(){
       items.push({name:fundName, src:'Crypto.com', val:(sig.fundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.fundingRate) * 100).toFixed(4) + '%' + (sig.estFundingRate != null ? ', next est. ' + (sig.estFundingRate >= 0 ? '+' : '\u2212') + (Math.abs(sig.estFundingRate) * 100).toFixed(4) + '%' : ''), lean:sig.fundingLean});
       factors.push(wl(fundName, sig.fundingLean));                                                    // its own vote -- a crowding/reversion read, not a trend one
     }
+    if (sig.fundingDelta != null){
+      var fundMomName = 'Funding rate momentum (10 min)';
+      items.push({name:fundMomName, src:'Crypto.com', val:(sig.fundingDelta >= 0 ? '+' : '\u2212') + (Math.abs(sig.fundingDelta) * 100).toFixed(4) + 'pp', lean:sig.fundingMomLean});
+      factors.push(wl(fundMomName, sig.fundingMomLean));                                              // the swing, read separately from the level above -- its own vote
+    }
   }
   if ($('useCdc').checked && cdc.basis && Date.now() - cdc.basis.at <= 45000){
     var bps = (cdc.basis.mark - cdc.basis.index) / cdc.basis.index * 10000;
@@ -2608,6 +2700,12 @@ function computeMomentumRaw(){
       items.push({name:kbName, src:'Kalshi', val:kb.yesQty.toFixed(0) + ' Yes / ' + kb.noQty.toFixed(0) + ' No', lean:kb.lean});
       factors.push(wl(kbName, kb.lean));                                     // the contract's own resting orders, not another read of BTC spot/futures
     }
+  }
+  var skewSig = deribitSkewLean();
+  if (skewSig){
+    var skewName = 'Deribit 25-delta skew';
+    items.push({name:skewName, src:'Deribit', val:(skewSig.skew >= 0 ? '+' : '−') + Math.abs(skewSig.skew).toFixed(2) + ' vol pts (' + (skewSig.skew >= 0 ? 'puts richer' : 'calls richer') + ')', lean:skewSig.lean});
+    factors.push(wl(skewName, skewSig.lean));                                 // which way the options market expects a move, not just how big -- its own vote
   }
   var comp = factors.reduce(function(a, x){ return a + x; }, 0) / factors.length;
   return {items:items, composite:comp, factors:factors.length, votes:factors.slice(), spike:!!(sig && sig.spike), sig:sig};
@@ -2687,9 +2785,9 @@ function oddsAt(Kx, E){
   var blend = blendVolCandidates(cands), perSec = blend.perSec, volSrc = blend.volSrc;
   var per5 = function(x){ return (x.perSec * Math.sqrt(300) * 100).toFixed(3) + '%'; };
   var volDetail = '24h/1h ' + (vol.perSec * Math.sqrt(300) * 100).toFixed(3) + '%' + (shortV ? (shortV.m30 ? ', 30m ' + per5(shortV.m30) : '') + (shortV.m10 ? ', 10m ' + per5(shortV.m10) : '') + (shortV.m3 ? ', 3m ' + per5(shortV.m3) : '') : '');
-  var autoNewsOn = newsActive();
-  var mult = Math.max($('news').checked ? NEWS_MULT : 1, (mom && mom.spike) ? SPIKE_MULT : 1, autoNewsOn ? NEWS_MULT : 1);
-  var multReason = $('news').checked ? 'the news window' : (autoNewsOn ? 'a burst of Fed/macro Bitcoin news' : ((mom && mom.spike) ? 'abnormal volume' : 'the news window'));
+  var autoNewsOn = newsActive(), autoTodOn = todActive();
+  var mult = Math.max($('news').checked ? NEWS_MULT : 1, (mom && mom.spike) ? SPIKE_MULT : 1, autoNewsOn ? NEWS_MULT : 1, autoTodOn ? TOD_MULT : 1);
+  var multReason = $('news').checked ? 'the news window' : (autoNewsOn ? 'a burst of Fed/macro Bitcoin news' : (autoTodOn ? 'the US equity open/close window' : ((mom && mom.spike) ? 'abnormal volume' : 'the news window')));
   var horizon = Math.max(T + ageMed, 1);
   var sig = perSec * mult * Math.sqrt(horizon);
   var mMode = $('momMode').value;
@@ -3695,8 +3793,10 @@ function renderOdds(){
   $('payNote').textContent = 'Over costs ' + Math.round(cO * 100) + '\u00a2 and gains ' + Math.round((1 - cO) * 100) + '\u00a2 per contract if right. Under costs ' + Math.round(cU * 100) + '\u00a2 and gains ' + Math.round((1 - cU) * 100) + '\u00a2. A win pays $1 per contract. The ' + curContractsPay + ' in the box now would cost ' + money(curStakePay) + ' (' + curRiskPct.toFixed(1) + '% of balance).';
   $('barFill').style.width = (o.pAbove * 100) + '%';
   var divIv = deribitIvPer5();
+  var atr1m = atr1mReading();
   $('volNote').textContent = 'Volatility used: ' + (o.perSec * Math.sqrt(300) * 100).toFixed(3) + '% per 5 minutes (from ' + o.volSrc + ')' + (o.mult > 1 ? ' \u00d7 ' + o.mult + ' for ' + o.multReason : '') + ' \u00b7 ' + ($('fat').checked ? 'fat-tailed odds' : 'normal-curve odds') + '. Readings per 5 minutes: ' + o.volDetail + '.' +
-    (divIv ? ' Deribit\u2019s own forward-looking read (the ' + divIv.days.toFixed(1) + '-day near-ATM option\u2019s implied vol, ' + divIv.annualPct.toFixed(0) + '% annualized): ' + divIv.per5pct.toFixed(3) + '% per 5 minutes \u2014 informational only, never applied.' : '');
+    (divIv ? ' Deribit\u2019s own forward-looking read (the ' + divIv.days.toFixed(1) + '-day near-ATM option\u2019s implied vol, ' + divIv.annualPct.toFixed(0) + '% annualized): ' + divIv.per5pct.toFixed(3) + '% per 5 minutes \u2014 informational only, never applied.' : '') +
+    (atr1m ? ' ATR(14), 1-min bars: $' + atr1m.usd.toFixed(1) + (atr1m.pct != null ? ' (' + (atr1m.pct * 100).toFixed(3) + '%)' : '') + ' \u2014 the typical size of a 1-minute candle right now, for scale; informational only, never applied.' : '');
   var leanTxt = o.lean == null ? '' : (o.lean >= 0 ? '+' : '\u2212') + Math.abs(o.lean).toFixed(2);
   var vts = (o.mom && o.mom.votes) || [], vUp = vts.filter(function(v){ return v >= 0.1; }).length, vDn = vts.filter(function(v){ return v <= -0.1; }).length;
   var sideNow = o.pAbove >= 0.5 ? 'above' : 'below', beNow = ((sideNow === 'above' ? o.pManual : 1 - o.pManual) - 0.5) * 100;
@@ -3888,6 +3988,7 @@ function tick(){
   renderReadiness();
   renderSettingsStrip();
   $('autoNewsNote').textContent = newsNoteText();
+  $('autoTodNote').textContent = todNoteText();
   $('avPriceNote').textContent = avPriceNoteText();
   $('flashNote').textContent = flashNote;
   renderKalshi();
@@ -5022,6 +5123,8 @@ $('newsLookback').value = get('cs_autonews_lookback_v1', '30');
 $('autoNewsOn').addEventListener('change', function(){ put('cs_autonews_on_v1', $('autoNewsOn').checked ? '1' : '0'); if ($('autoNewsOn').checked) newsPoll(); tick(); });
 $('newsMinArticles').addEventListener('change', function(){ put('cs_autonews_min_v1', $('newsMinArticles').value); tick(); });
 $('newsLookback').addEventListener('change', function(){ put('cs_autonews_lookback_v1', $('newsLookback').value); tick(); });
+$('autoTodOn').checked = get('cs_autotod_on_v1', '0') === '1';
+$('autoTodOn').addEventListener('change', function(){ put('cs_autotod_on_v1', $('autoTodOn').checked ? '1' : '0'); tick(); });
 $('volSpeed').value = get('cs_vol_speed_v1', '2');
 $('volSpeed').addEventListener('change', function(){ put('cs_vol_speed_v1', $('volSpeed').value); updateShortVol(); tick(); });
 $('fat').addEventListener('change', function(){ put(K.fat, $('fat').checked ? '1' : '0'); tick(); });

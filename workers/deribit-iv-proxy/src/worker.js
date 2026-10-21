@@ -11,10 +11,21 @@
  * CORS headers for a page on your own domain, and the raw response is reshaped into something
  * simpler than "every live BTC option, as one big array" (see pickAtmOption below).
  *
+ * Also returns a 25-delta risk reversal (skew_25d = the 25-delta put's IV minus the 25-delta
+ * call's IV, in vol points): positive means the market is paying up for downside protection
+ * relative to upside (a "fear" skew), negative the reverse. This is genuinely different
+ * information from the ATM level above -- it reads the market's expected DIRECTION of a big move,
+ * not just its expected SIZE. Deribit's bulk book-summary endpoint (used for everything else here)
+ * carries no greeks, so the 25-delta strikes are found by computing each option's own delta from
+ * its own mark_iv with a plain Black-Scholes approximation (deltaApprox below) -- not Deribit's own
+ * reported greek, and said so in the field names (*_delta is this page's own estimate).
+ *
  * Route:
  *   GET /api/iv -> { payload: {
  *     ok, mark_iv, call_mark_iv, put_mark_iv, underlying_price, atm_strike,
- *     expiry (ISO), days_to_expiry, instrument_call, instrument_put, fetched_at, warnings
+ *     expiry (ISO), days_to_expiry, instrument_call, instrument_put,
+ *     skew_25d, call25_strike, call25_iv, call25_delta, put25_strike, put25_iv, put25_delta,
+ *     fetched_at, warnings
  *   } }
  */
 
@@ -112,6 +123,49 @@ function pickAtmOption(rows, now) {
     expiry: new Date(group.expiryMs).toISOString(),
     days_to_expiry: Math.round((group.expiryMs - now) / 86400000 * 10) / 10,
     instrument_call: call ? call.instrument : null, instrument_put: put ? put.instrument : null,
+    group: group, underlying: underlying,   // handed to pickSkew below; not part of the public payload
+  };
+}
+
+/* Standard-normal CDF (Abramowitz & Stegun 7.1.26) -- accurate to ~1e-7, plenty for picking the
+   nearest-to-25-delta strike out of whatever strikes Deribit happens to list. */
+function normCdf(x) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp(-x * x / 2);
+  let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  if (x > 0) p = 1 - p;
+  return p;
+}
+/* Black-Scholes delta from the OPTION'S OWN mark_iv (zero rate/dividend -- these are short-dated,
+   coin-margined BTC options, where that approximation is standard and the error is negligible next
+   to bid/ask spread). Returns null rather than guessing if any input is unusable. */
+function deltaApprox(kind, S, K, sigma, T) {
+  if (!(S > 0) || !(K > 0) || !(sigma > 0) || !(T > 0)) return null;
+  const d1 = (Math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * Math.sqrt(T));
+  const callDelta = normCdf(d1);
+  return kind === 'call' ? callDelta : callDelta - 1;
+}
+/* Within the same expiry group pickAtmOption already chose, find the call nearest 0.25 delta and
+   the put nearest -0.25 delta, each computed from its own mark_iv, and the resulting IV skew
+   between them. Returns an object with everything null (not an error) if nothing in the group has
+   enough strikes to estimate deltas from -- the ATM reading above still stands on its own either way. */
+function pickSkew(group, underlying, now) {
+  const empty = { skew_25d: null, call25_strike: null, call25_iv: null, call25_delta: null, put25_strike: null, put25_iv: null, put25_delta: null };
+  if (!group) return empty;
+  const T = (group.expiryMs - now) / (365 * 86400000);
+  if (!(T > 0)) return empty;
+  let bestCall = null, bestCallDist = Infinity, bestPut = null, bestPutDist = Infinity;
+  group.options.forEach(function (o) {
+    const d = deltaApprox(o.kind, underlying, o.strike, o.iv / 100, T);     // o.iv is mark_iv as a PERCENT (e.g. 55 for 55%), Black-Scholes needs a decimal fraction
+    if (d == null) return;
+    if (o.kind === 'call') { const dist = Math.abs(d - 0.25); if (dist < bestCallDist) { bestCallDist = dist; bestCall = { o: o, delta: d }; } }
+    else { const dist = Math.abs(d - (-0.25)); if (dist < bestPutDist) { bestPutDist = dist; bestPut = { o: o, delta: d }; } }
+  });
+  if (!bestCall || !bestPut) return empty;
+  return {
+    skew_25d: bestPut.o.iv - bestCall.o.iv,
+    call25_strike: bestCall.o.strike, call25_iv: bestCall.o.iv, call25_delta: Math.round(bestCall.delta * 1000) / 1000,
+    put25_strike: bestPut.o.strike, put25_iv: bestPut.o.iv, put25_delta: Math.round(bestPut.delta * 1000) / 1000,
   };
 }
 
@@ -120,7 +174,9 @@ async function buildIv() {
   const now = Date.now();
   const picked = pickAtmOption(rows, now);
   if (!picked.ok) return { ok: false, error: picked.reason, fetched_at: new Date(now).toISOString() };
-  return Object.assign({ fetched_at: new Date(now).toISOString(), warnings: [] }, picked);
+  const skew = pickSkew(picked.group, picked.underlying, now);
+  delete picked.group; delete picked.underlying;   // internal to this worker only, not part of the public payload
+  return Object.assign({ fetched_at: new Date(now).toISOString(), warnings: [] }, picked, skew);
 }
 
 export default {

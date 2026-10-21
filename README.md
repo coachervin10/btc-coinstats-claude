@@ -131,6 +131,39 @@ existing mark/index basis reading already uses) rather than a guessed fixed numb
 no textbook-normal value for things like "typical open interest change over 5 minutes" for this
 specific instrument.
 
+## Four more signals: funding momentum, ATR, time-of-day, Deribit skew
+
+- **Funding rate momentum (10 min)** — its own vote, separate from the existing funding-rate
+  *level* reading above. Tracks a short history of signed funding-rate readings and leans against
+  how fast the rate has swung over the last ~10 minutes, not just where it currently sits — a rate
+  climbing quickly toward longs-pay-more can front-run a squeeze before the level itself looks
+  extreme. Same crowding logic and sign convention as the level reading, same adaptive scaling
+  against its own recent swing sizes.
+- **ATR(14), 1-minute bars** — informational only, shown in the volatility note (`volNote`) next to
+  the realized-vol readings and Deribit's IV, not pushed into the momentum table: a magnitude
+  (typical size of a 1-minute candle right now), not a direction, so it has no natural "lean." Plain
+  (not Wilder-smoothed) average true range over Crypto.com's 1-minute candles, for scale.
+- **Time-of-day volatility multiplier** (`autoTodOn` checkbox, off by default) — widens the odds by
+  &times;1.25 during the US equity open (9:30–10:00am ET) and close (3:45–4:00pm ET) windows,
+  weekdays only, where BTC has reliably shown faster short-term moves. Computed straight from the
+  clock in `America/New_York` (correct across DST with no special-casing needed), not from any data
+  feed — nothing here can go stale or fail to reach a server. Same mechanism as the existing
+  news-burst multiplier (`autoNewsOn`), just a smaller, recurring effect rather than a rare spike,
+  so a smaller multiplier.
+- **Deribit 25-delta skew** — its own vote, added to `deribit-iv-proxy` alongside the existing ATM
+  IV level. The ATM reading only says how big a move the options market expects; the skew says
+  which *direction* it's bracing for. Deribit's bulk book-summary endpoint (used for everything else
+  in that Worker) carries no greeks, so the 25-delta put and call are found by computing each
+  option's own delta from its own `mark_iv` with a plain Black-Scholes approximation — this is this
+  page's own estimate, not a greek Deribit reports, and the response field names (`call25_delta`,
+  `put25_delta`) say so. `skew_25d` is the 25-delta put's IV minus the 25-delta call's IV, in vol
+  points: positive means puts are priced richer (a "fear" skew, bearish lean here), negative means
+  calls are (bullish lean). 10 vol points of skew — a genuinely large reading for a short-dated BTC
+  option — maps to a full-strength lean; that scale is this page's own choice, not a market
+  convention. Returns nulls (not an error) when nothing in the chosen expiry's strike ladder is
+  close enough to either 25-delta target to trust; the ATM reading still stands on its own either
+  way.
+
 ## Cross-exchange reference price (`refprice-proxy`)
 
 `workers/refprice-proxy` fetches Coinbase, Kraken, Bitstamp, Gemini, Bullish and itBit's public
