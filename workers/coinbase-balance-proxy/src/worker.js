@@ -6,13 +6,19 @@
  * choice made in Coinbase's own key-creation screen, not something this code can do anything with,
  * since it never calls any endpoint but the one below.
  *
- * Auth: Coinbase Developer Platform (CDP) API keys, authenticated with a short-lived ES256 JWT
- * (RFC 7519 / JWS) signed with your key's EC (P-256) private key -- see
+ * Auth: Coinbase Developer Platform (CDP) API keys, authenticated with a short-lived JWT (RFC
+ * 7519 / JWS) signed with your key's private key -- see
  * https://docs.cdp.coinbase.com/get-started/authentication/jwt-authentication. Two secrets:
  *   COINBASE_CDP_KEY_NAME     "organizations/{org_id}/apiKeys/{key_id}"
- *   COINBASE_CDP_PRIVATE_KEY  the PEM-formatted EC private key Coinbase shows you ONCE at
- *                             creation time (begins "-----BEGIN EC PRIVATE KEY-----" or
- *                             "-----BEGIN PRIVATE KEY-----")
+ *   COINBASE_CDP_PRIVATE_KEY  the private key Coinbase shows you ONCE at creation time, in
+ *                             whichever of its two shapes the CDP portal gave you:
+ *                               - Ed25519 (the portal's current default): a bare base64 string,
+ *                                 no PEM markers -- signed with EdDSA
+ *                               - ECDSA/P-256 (legacy): a PEM, either "-----BEGIN EC PRIVATE
+ *                                 KEY-----" (SEC1) or "-----BEGIN PRIVATE KEY-----" (PKCS8) --
+ *                                 signed with ES256
+ *                             importSigningKey() below detects which one it got from the
+ *                             secret's own shape and signs with the matching algorithm.
  * Set both with `wrangler secret put` or as encrypted GitHub Actions secrets -- never commit them,
  * and never paste them into a chat with anyone, Claude included.
  *
@@ -86,24 +92,56 @@ function sec1ToPkcs8(sec1) {
   return new Uint8Array(outer);
 }
 
-async function importSigningKey(pem) {
-  const isSec1 = /BEGIN EC PRIVATE KEY/.test(pem);
-  const bytes = pemBody(pem);
-  const der = isSec1 ? sec1ToPkcs8(bytes) : bytes;
-  return crypto.subtle.importKey('pkcs8', der, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+/* Fixed 16-byte PKCS8 prefix for an Ed25519 private key (RFC 8410): SEQUENCE { INTEGER 0,
+   SEQUENCE { OID 1.3.101.112 (id-Ed25519) }, OCTET STRING { OCTET STRING { <32-byte seed> } } }.
+   Appending any 32-byte seed to this constant produces a complete, valid PKCS8 DER blob -- there
+   is no per-key structure to compute, unlike the EC case above. */
+const ED25519_PKCS8_PREFIX = new Uint8Array([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
+function ed25519SeedToPkcs8(seed32) {
+  const out = new Uint8Array(ED25519_PKCS8_PREFIX.length + 32);
+  out.set(ED25519_PKCS8_PREFIX, 0);
+  out.set(seed32, ED25519_PKCS8_PREFIX.length);
+  return out;
 }
 
-async function buildJwt(keyName, privateKeyPem, method, host, path) {
-  const key = await importSigningKey(privateKeyPem);
+/* The CDP portal's two key formats, detected from the secret's own shape -- never from any
+   separate "which kind of key is this" setting, since Coinbase doesn't give you one to read:
+   - Ed25519 (the portal's current recommended default): a bare base64 string with no PEM
+     markers at all, decoding to 64 raw bytes -- the first 32 are the signing seed, the last 32
+     are the (unused here) public key, per Coinbase's own JWT-auth docs.
+   - ECDSA/P-256 (legacy): a PEM, either "-----BEGIN EC PRIVATE KEY-----" (SEC1, re-wrapped into
+     PKCS8 above) or already "-----BEGIN PRIVATE KEY-----" (PKCS8, used as-is).
+   Returns { key, alg } where alg is the JWT header's "alg" value, since the two key types sign
+   with different algorithms (EdDSA vs ES256) and that has to match what was actually used. */
+async function importSigningKey(secret) {
+  if (/-----BEGIN/.test(secret)) {
+    const isSec1 = /BEGIN EC PRIVATE KEY/.test(secret);
+    const bytes = pemBody(secret);
+    const der = isSec1 ? sec1ToPkcs8(bytes) : bytes;
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    return { key: key, alg: 'ES256' };
+  }
+  const bin = atob(secret.trim());
+  const full = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) full[i] = bin.charCodeAt(i);
+  const seed = full.slice(0, 32);
+  const der = ed25519SeedToPkcs8(seed);
+  const key = await crypto.subtle.importKey('pkcs8', der, { name: 'Ed25519' }, false, ['sign']);
+  return { key: key, alg: 'EdDSA' };
+}
+
+async function buildJwt(keyName, privateKeySecret, method, host, path) {
+  const signing = await importSigningKey(privateKeySecret);
   const now = Math.floor(Date.now() / 1000);
-  const header = { alg: 'ES256', typ: 'JWT', kid: keyName, nonce: randomNonce() };
-  const claims = { sub: keyName, iss: 'cdp', nbf: now, exp: now + 120, uri: method + ' ' + host + path };
+  const header = { alg: signing.alg, typ: 'JWT', kid: keyName, nonce: randomNonce() };
+  const claims = { sub: keyName, iss: 'cdp', aud: ['cdp_service'], nbf: now, exp: now + 120, uri: method + ' ' + host + path };
   const signingInput = b64urlStr(JSON.stringify(header)) + '.' + b64urlStr(JSON.stringify(claims));
+  const signAlg = signing.alg === 'EdDSA' ? { name: 'Ed25519' } : { name: 'ECDSA', hash: 'SHA-256' };
   const sigBuf = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: 'SHA-256' },
-    key,
+    signAlg,
+    signing.key,
     new TextEncoder().encode(signingInput)
-  ); // Web Crypto's ECDSA signature is already the raw (r||s) format JWS/ES256 expects -- no DER conversion needed.
+  ); // Both Ed25519 and Web Crypto's ECDSA already produce the raw signature format JWS expects -- no DER conversion needed either way.
   return signingInput + '.' + b64url(sigBuf);
 }
 
@@ -141,29 +179,6 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === '/' || url.pathname === '/health') return json(200, { ok: true, name: 'coinbase-balance-proxy' });
-    if (url.pathname === '/api/keyshape') {
-      // Temporary, read-only diagnostic: reports the SHAPE of the configured key secret (length,
-      // whether it has PEM markers, first/last few characters) without ever returning the key
-      // itself, to debug a format mismatch. Remove once the real format is confirmed working.
-      const pk = env.COINBASE_CDP_PRIVATE_KEY || '';
-      const hasBegin = /-----BEGIN/.test(pk);
-      return json(200, {
-        payload: {
-          keyNameSet: !!env.COINBASE_CDP_KEY_NAME,
-          privateKeyLength: pk.length,
-          hasBeginMarker: hasBegin,
-          hasEcMarker: /BEGIN EC PRIVATE KEY/.test(pk),
-          hasPkcs8Marker: /BEGIN PRIVATE KEY/.test(pk) && !/BEGIN EC PRIVATE KEY/.test(pk),
-          hasLiteralBackslashN: pk.indexOf('\\n') !== -1,
-          hasRealNewline: pk.indexOf('\n') !== -1,
-          // Only safe to show when PEM markers are present -- that's header/footer text, not key
-          // material. Withheld entirely for a bare (no-PEM-marker) secret, since every character
-          // of that form IS the key.
-          first20: hasBegin ? pk.slice(0, 20) : null,
-          last20: hasBegin ? pk.slice(-20) : null,
-        },
-      });
-    }
     if (url.pathname !== '/api/accounts') return json(404, { error: 'not_found' });
 
     if (!env.COINBASE_CDP_KEY_NAME || !env.COINBASE_CDP_PRIVATE_KEY) {
