@@ -428,8 +428,8 @@ body.view-simple .adv{ display:none !important; }
       </div>
 
       <div class="card">
-        <h2>Coinbase account (read-only)</h2>
-        <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="useCoinbaseAcct"><span>show my real Coinbase account balances here, for reference only &mdash; this page can never place an order or move funds, no matter what permissions the API key has. Give the key only the &ldquo;View&rdquo; permission in Coinbase's own key-creation screen (leave Trade, Transfer and Receive unchecked) and it becomes physically incapable of trading or withdrawing, independent of this page's code. Off by default.</span></label>
+        <h2>Coinbase cash balance (read-only)</h2>
+        <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="useCoinbaseAcct"><span>show my real Coinbase cash balance here (USD/USDC/USDT only, not BTC or other crypto holdings), for reference only &mdash; this page can never place an order or move funds, no matter what permissions the API key has. Give the key only the &ldquo;View&rdquo; permission in Coinbase's own key-creation screen (leave Trade, Transfer and Receive unchecked) and it becomes physically incapable of trading or withdrawing, independent of this page's code. Off by default.</span></label>
         <div id="coinbaseAcctBody" class="prob-meta">Off.</div>
       </div>
 
@@ -1853,6 +1853,15 @@ function deribitIvPer5(){
    no account to show), and degrades to a quiet "not set up" message rather than an error if the
    Worker's two secrets haven't been configured yet -- see that Worker's wrangler.toml. */
 var coinbaseAcct = {data:null, busy:false, fails:0, recvAt:0, notConfigured:false, error:null};
+/* "Cash" here means USD/USDC/USDT only, not BTC or other crypto holdings -- both the card below
+   and the "set paper balance from Coinbase cash" button filter to just these, on purpose: this
+   page is a BTC price-direction tracker, so a real BTC balance sitting in the same account isn't
+   spendable bankroll in the same sense cash is, and showing it alongside cash invites confusing
+   the two. */
+var CASH_CURRENCIES = ['USD', 'USDC', 'USDT'];
+function coinbaseCashAccounts(){
+  return coinbaseAcct.data ? coinbaseAcct.data.filter(function(a){ return CASH_CURRENCIES.indexOf(a.currency) !== -1; }) : null;
+}
 var COINBASE_ACCT_EVERY_MS = 60000;
 async function coinbaseAcctPoll(){
   if (sessionClosed || coinbaseAcct.busy || document.hidden || !$('useCoinbaseAcct').checked) return;
@@ -1884,8 +1893,9 @@ function renderCoinbaseAcct(){
   if (coinbaseAcct.notConfigured){ el.textContent = 'Not set up yet — add the two API-key secrets to coinbase-balance-proxy (see README) to show your real balances here.'; return; }
   if (coinbaseAcct.error && !coinbaseAcct.data){ el.textContent = 'Could not reach Coinbase: ' + coinbaseAcct.error; return; }
   if (!coinbaseAcct.data){ el.textContent = 'Loading…'; return; }
-  if (!coinbaseAcct.data.length){ el.textContent = 'Connected — no nonzero balances on this account.'; return; }
-  el.innerHTML = coinbaseAcct.data.map(function(a){
+  var cash = coinbaseCashAccounts();
+  if (!cash.length){ el.textContent = 'Connected — no USD/USDC/USDT cash balance on this account.'; return; }
+  el.innerHTML = cash.map(function(a){
     var amt = a.available != null ? a.available : 0, hold = a.hold || 0;
     return '<div class="row" style="justify-content:space-between;"><span>' + a.currency + '</span><span>' +
       amt.toLocaleString(undefined, {maximumFractionDigits:8}) + (hold ? ' (+' + hold.toLocaleString(undefined, {maximumFractionDigits:8}) + ' held)' : '') + '</span></div>';
@@ -5077,15 +5087,12 @@ $('reset').addEventListener('click', function(){
   paper = {balance:1000, bets:[]}; savePaper(); renderLedger(); $('betMsg').textContent = 'Paper account reset to $1,000.';
 });
 /* Sets the PAPER balance to match real cash on hand in the connected Coinbase account -- a
-   number only, never a real transfer. "Cash" here means USD/USDC/USDT balances (not BTC or
-   other crypto holdings), since those are the stable, spendable amounts a real version of this
-   bankroll would actually be sized from. Every bet placed afterward is still 100% simulated. */
-var CASH_CURRENCIES = ['USD', 'USDC', 'USDT'];
+   number only, never a real transfer. Every bet placed afterward is still 100% simulated.
+   CASH_CURRENCIES / coinbaseCashAccounts() are defined above, next to the coinbaseAcct state. */
 function coinbaseCashTotal(){
-  if (!coinbaseAcct.data) return null;
-  return coinbaseAcct.data
-    .filter(function(a){ return CASH_CURRENCIES.indexOf(a.currency) !== -1; })
-    .reduce(function(a, x){ return a + (x.available || 0); }, 0);
+  var cash = coinbaseCashAccounts();
+  if (cash == null) return null;
+  return cash.reduce(function(a, x){ return a + (x.available || 0); }, 0);
 }
 var syncBalTimer = null;
 $('syncCoinbaseBalance').addEventListener('click', function(){
