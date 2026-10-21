@@ -15,6 +15,14 @@
  * spendable cash across the whole portfolio -- crypto, equities, and prediction-market activity
  * included -- which is what "cash available" means here.
  *
+ * KNOWN LIMITATION: Coinbase hasn't published a dedicated prediction-markets balance endpoint
+ * (checked their full documented REST surface -- there isn't one), and in practice this figure has
+ * been observed running noticeably behind what the app's own Predictions/home screens show (tens
+ * of dollars off, with zero open positions, so it isn't a stale-position issue). This is almost
+ * certainly Coinbase's own aggregate lagging a very new feature, not a bug in this Worker, but
+ * there's nothing further to fix here until Coinbase's API catches up -- hence the page offers a
+ * manual override next to this card for whenever the two disagree.
+ *
  * Auth: Coinbase Developer Platform (CDP) API keys, authenticated with a short-lived JWT (RFC
  * 7519 / JWS) signed with your key's private key -- see
  * https://docs.cdp.coinbase.com/get-started/authentication/jwt-authentication. Two secrets:
@@ -199,31 +207,6 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === '/' || url.pathname === '/health') return json(200, { ok: true, name: 'coinbase-balance-proxy' });
-    if (url.pathname === '/api/debugbreakdown') {
-      // Temporary, read-only diagnostic: dumps every portfolio_balances field and position count,
-      // to find which figure matches what the Coinbase app itself shows as "balance." No secret
-      // material, only the account's own balance numbers. Remove once the right field is settled.
-      if (!env.COINBASE_CDP_KEY_NAME || !env.COINBASE_CDP_PRIVATE_KEY) return json(200, { payload: { ok: false, reason: 'not_configured' } });
-      try {
-        const list = await cbGet(env, '/api/v3/brokerage/portfolios');
-        const portfolios = Array.isArray(list.portfolios) ? list.portfolios.filter(function (p) { return !p.deleted; }) : [];
-        const out = [];
-        for (const p of portfolios) {
-          const detail = await cbGet(env, '/api/v3/brokerage/portfolios/' + encodeURIComponent(p.uuid));
-          const bd = detail.breakdown || {};
-          out.push({
-            portfolio: { name: p.name, type: p.type },
-            portfolio_balances: bd.portfolio_balances,
-            spot_positions_count: (bd.spot_positions || []).length,
-            perp_positions_count: (bd.perp_positions || []).length,
-            prediction_markets_positions: (bd.prediction_markets_positions || []).map(function (x) { return { product_type: x.product_type, side: x.side, notional_value: x.notional_value, cost_basis: x.cost_basis, unrealized_pnl: x.unrealized_pnl, current_price: x.current_price }; }),
-          });
-        }
-        return json(200, { payload: { ok: true, portfolios: out } });
-      } catch (e) {
-        return json(502, { payload: { ok: false, detail: String((e && e.message) || e) } });
-      }
-    }
     if (url.pathname !== '/api/accounts') return json(404, { error: 'not_found' });
 
     if (!env.COINBASE_CDP_KEY_NAME || !env.COINBASE_CDP_PRIVATE_KEY) {

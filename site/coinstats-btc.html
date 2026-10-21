@@ -431,6 +431,11 @@ body.view-simple .adv{ display:none !important; }
         <h2>Coinbase cash balance (read-only)</h2>
         <label class="row" style="margin-bottom:8px;"><input type="checkbox" id="useCoinbaseAcct"><span>show my real Coinbase cash balance here &mdash; the actual spendable cash across your whole portfolio, including prediction-markets activity, not a BTC or other crypto holding. For reference only: this page can never place an order or move funds, no matter what permissions the API key has. Give the key only the &ldquo;View&rdquo; permission in Coinbase's own key-creation screen (leave Trade, Transfer and Receive unchecked) and it becomes physically incapable of trading or withdrawing, independent of this page's code. Off by default.</span></label>
         <div id="coinbaseAcctBody" class="prob-meta">Off.</div>
+        <div class="target-row" style="margin-top:8px;">
+          <label for="coinbaseCashOverride" class="prob-meta">Override (if the auto-fetched figure is wrong)</label>
+          <input type="number" id="coinbaseCashOverride" step="0.01" min="0" placeholder="e.g. 79.69" style="width:100px;" aria-label="Manually entered cash balance, used instead of the auto-fetched one when set">
+        </div>
+        <div class="prob-meta" style="margin:-4px 0 0;">Coinbase's API for prediction-markets cash is new and can lag the app -- type in the number you see in the app here and this page will use it instead. Clear it to go back to auto-fetch.</div>
       </div>
 
       <div class="card">
@@ -1890,9 +1895,27 @@ function renderCoinbaseAcct(){
   if (coinbaseAcct.notConfigured){ el.textContent = 'Not set up yet — add the two API-key secrets to coinbase-balance-proxy (see README) to show your real balance here.'; return; }
   if (coinbaseAcct.error && !coinbaseAcct.data){ el.textContent = 'Could not reach Coinbase: ' + coinbaseAcct.error; return; }
   if (!coinbaseAcct.data){ el.textContent = 'Loading…'; return; }
-  var cash = coinbaseAcct.data;
-  el.innerHTML = '<div class="row" style="justify-content:space-between;"><span>Cash available</span><span>' +
+  var cash = coinbaseAcct.data, override = coinbaseCashOverride();
+  var rows = '<div class="row" style="justify-content:space-between;"><span>Auto-fetched</span><span>' +
     money(cash.value) + (cash.currency && cash.currency !== 'USD' ? ' ' + cash.currency : '') + '</span></div>';
+  if (override != null){
+    rows += '<div class="row" style="justify-content:space-between; font-weight:600;"><span>Using (override)</span><span>' + money(override) + '</span></div>';
+  }
+  el.innerHTML = rows;
+}
+/* The manual override typed into #coinbaseCashOverride, or null if it's empty/invalid. Takes
+   priority over the auto-fetched figure everywhere cash is used (the card above, and the "set
+   paper balance" button) -- see this Worker's known-limitation note on why one might be needed. */
+function coinbaseCashOverride(){
+  var raw = $('coinbaseCashOverride') ? $('coinbaseCashOverride').value : '';
+  if (raw === '' || raw == null) return null;
+  var v = parseFloat(raw);
+  return isFinite(v) && v >= 0 ? v : null;
+}
+function coinbaseEffectiveCash(){
+  var override = coinbaseCashOverride();
+  if (override != null) return override;
+  return coinbaseAcct.data ? coinbaseAcct.data.value : null;
 }
 /* Volume trend over the last ~60s: how much total cross-exchange 24h volume rose (or fell) since
    the oldest sample still within that window. A rising total means fresh trading activity is
@@ -4918,6 +4941,8 @@ $('useEthBtc').checked = get('cs_use_ethbtc_v1', '0') === '1';
 $('useEthBtc').addEventListener('change', function(){ put('cs_use_ethbtc_v1', $('useEthBtc').checked ? '1' : '0'); if ($('useEthBtc').checked) ethBtcPoll(); else { ethBtc.candles5 = null; ethBtc.msg = ''; } renderEthBtc(); tick(); });
 $('useCoinbaseAcct').checked = get('cs_use_coinbase_acct_v1', '0') === '1';
 $('useCoinbaseAcct').addEventListener('change', function(){ put('cs_use_coinbase_acct_v1', $('useCoinbaseAcct').checked ? '1' : '0'); if ($('useCoinbaseAcct').checked) coinbaseAcctPoll(); else { coinbaseAcct.data = null; coinbaseAcct.error = null; } renderCoinbaseAcct(); });
+$('coinbaseCashOverride').value = get('cs_coinbase_cash_override_v1', '');
+$('coinbaseCashOverride').addEventListener('change', function(){ put('cs_coinbase_cash_override_v1', $('coinbaseCashOverride').value || ''); renderCoinbaseAcct(); });
 $('strike').addEventListener('input', onStrikeInput);
 $('stake').addEventListener('input', function(){ put(K.stake, $('stake').value); });
 $('period').addEventListener('change', function(){ put(K.period, $('period').value); tick(); });
@@ -5087,8 +5112,8 @@ $('syncCoinbaseBalance').addEventListener('click', function(){
   if (!$('useCoinbaseAcct').checked || coinbaseAcct.notConfigured){
     note.textContent = 'Turn on and set up the Coinbase cash card above first.'; return;
   }
-  if (!coinbaseAcct.data){ note.textContent = 'Still loading your Coinbase cash balance -- try again in a few seconds.'; return; }
-  var cash = coinbaseAcct.data.value;
+  var cash = coinbaseEffectiveCash();
+  if (cash == null){ note.textContent = 'Still loading your Coinbase cash balance -- try again in a few seconds.'; return; }
   if (cash <= 0){ note.textContent = 'No cash found in that account (' + money(cash) + ').'; return; }
   if (!syncBalTimer){
     b.textContent = 'Click again to set paper balance to ' + money(cash);

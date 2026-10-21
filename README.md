@@ -310,6 +310,12 @@ never read by any sizing, odds, or auto-trading logic elsewhere on the page -- e
 explicitly click "Set balance from Coinbase cash" in Paper trading, which copies that one number
 into the paper account's starting balance (still fake money; no real funds move).
 
+**Known limitation:** Coinbase hasn't published a dedicated API endpoint for prediction-markets
+cash, and in practice the auto-fetched figure has been observed running noticeably behind what the
+app's own Predictions screen shows. There's an **override field** right under the card for exactly
+this -- type in the number you see in the Coinbase app and the page uses that everywhere instead
+(including for "Set balance from Coinbase cash"); clear it to go back to auto-fetch.
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run
