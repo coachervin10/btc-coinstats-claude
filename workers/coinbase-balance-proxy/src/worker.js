@@ -141,6 +141,29 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === '/' || url.pathname === '/health') return json(200, { ok: true, name: 'coinbase-balance-proxy' });
+    if (url.pathname === '/api/keyshape') {
+      // Temporary, read-only diagnostic: reports the SHAPE of the configured key secret (length,
+      // whether it has PEM markers, first/last few characters) without ever returning the key
+      // itself, to debug a format mismatch. Remove once the real format is confirmed working.
+      const pk = env.COINBASE_CDP_PRIVATE_KEY || '';
+      const hasBegin = /-----BEGIN/.test(pk);
+      return json(200, {
+        payload: {
+          keyNameSet: !!env.COINBASE_CDP_KEY_NAME,
+          privateKeyLength: pk.length,
+          hasBeginMarker: hasBegin,
+          hasEcMarker: /BEGIN EC PRIVATE KEY/.test(pk),
+          hasPkcs8Marker: /BEGIN PRIVATE KEY/.test(pk) && !/BEGIN EC PRIVATE KEY/.test(pk),
+          hasLiteralBackslashN: pk.indexOf('\\n') !== -1,
+          hasRealNewline: pk.indexOf('\n') !== -1,
+          // Only safe to show when PEM markers are present -- that's header/footer text, not key
+          // material. Withheld entirely for a bare (no-PEM-marker) secret, since every character
+          // of that form IS the key.
+          first20: hasBegin ? pk.slice(0, 20) : null,
+          last20: hasBegin ? pk.slice(-20) : null,
+        },
+      });
+    }
     if (url.pathname !== '/api/accounts') return json(404, { error: 'not_found' });
 
     if (!env.COINBASE_CDP_KEY_NAME || !env.COINBASE_CDP_PRIVATE_KEY) {
