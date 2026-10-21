@@ -88,6 +88,19 @@ settlement value" feature (the `kalshiOfficialOn` checkbox): it calls the same p
 settled window's own `expiration_value` field — the index value Kalshi actually judged that
 window against — plus its strike and result. No API key or account needed; this is public data.
 
+`/api/orderbook` (`get_btc15_orderbook`) now also feeds the momentum model directly, as the
+"Kalshi book imbalance (Yes vs No bids)" signal — turned on automatically whenever `kalshiOn` is
+checked, polled at the same cadence as the market price (`kalshiEvery`). Every other signal in the
+model reads BTC spot or futures data and infers what the contract *should* be worth; this one
+reads the resting orders of the people actually pricing KXBTC15M right now, which is genuinely
+independent of everything else here. It sums the size resting on the Yes-bid and No-bid ladders
+(the ask ladders are mechanically derived from the opposite side's bids in `worker.js`'s
+`parseBook()`, so they carry no new information and are skipped to avoid double-counting) and
+leans toward whichever side has more size behind it. It's skipped — contributes nothing, pushes no
+item — when the book is empty, too thin to mean anything, or doesn't match the ticker of the
+window currently being traded. No API key or account needed; this is the same public, no-auth
+route `/api/market` already uses.
+
 One Kalshi feature in the page still isn't implemented on this Worker and will show as
 unavailable rather than erroring loudly: the live, authenticated BRTI ticker feed
 (`get_brti_live`), which needs your own Kalshi API key and possibly a separate CF Benchmarks

@@ -1629,6 +1629,51 @@ function kalshiForWindow(E){
   var closeMs = Date.parse(kx.m.close_time);
   return isFinite(closeMs) && Math.abs(closeMs - E) <= 2000 ? kx : null;
 }
+/* ---------- Kalshi's own orderbook for this market: resting bid depth on Yes vs No ----------
+   Everything else this page feeds into the momentum composite reads BTC spot/futures data and infers what the
+   contract *should* be worth. This reads the contract's own book instead -- the resting orders of the people
+   actually pricing KXBTC15M right now -- which is genuinely independent information, not another view of the
+   same price action. yes_asks/no_asks are mechanically derived from the opposite side's bids (see
+   workers/kalshi-btc15/src/worker.js, parseBook()), so only the two bid ladders carry anything new; the asks
+   are skipped here to avoid double-counting. Polled at the same cadence as kalshiPoll (kalshiEvery), through
+   the same public, read-only, no-token REST route. */
+var KALSHI_BOOK_MAX_AGE_MS = 20000;
+var kalshiBook = {b:null, recvAt:0, lastStart:0, busy:false, fails:0, msg:'', pausedUntil:0};
+async function kalshiBookPoll(){
+  if (sessionClosed || kalshiBook.busy || document.hidden || !$('kalshiOn').checked) return;
+  var now = Date.now();
+  if (now < kalshiBook.pausedUntil) return;
+  if (now - kalshiBook.lastStart < (+$('kalshiEvery').value || 3) * 1000) return;
+  kalshiBook.busy = true; kalshiBook.lastStart = now;
+  try {
+    var res = await callApi(KALSHI_SERVER, 'get_btc15_orderbook', {depth:5});
+    var d = kalshiUnwrap(res);
+    if (!d || d.ok !== true) throw {code:'bad_shape', message:'the reply had no readable orderbook'};
+    kalshiBook.b = d; kalshiBook.recvAt = Date.now(); kalshiBook.fails = 0; kalshiBook.msg = '';
+  } catch (e) {
+    kalshiBook.fails++; kalshiBook.msg = kalshiErrorText(e);
+    if (e && FATAL.indexOf(e.code) >= 0){ kalshiBook.b = null; kalshiBook.pausedUntil = Date.now() + 60000; }
+    else if (kalshiBook.fails >= 3) kalshiBook.b = null;
+  } finally { kalshiBook.busy = false; tick(); }
+}
+function kalshiBookFresh(){
+  if (!kalshiBook.b) return null;
+  return (Date.now() - kalshiBook.recvAt) <= KALSHI_BOOK_MAX_AGE_MS ? kalshiBook.b : null;
+}
+/* lean > 0 favors Up: more resting size wants to buy Yes (Up) than No (Down) right now. Only trusted when the
+   book's own ticker matches the window currently being traded, same guard kalshiForWindow uses for the price
+   reading, and only when there is enough resting size to mean anything. */
+function kalshiBookLean(E){
+  var b = kalshiBookFresh();
+  if (!b || !b.ticker) return null;
+  var kx = kalshiForWindow(E);
+  if (!kx || kx.m.ticker !== b.ticker) return null;
+  var yesQty = (b.yes_bids || []).reduce(function(a, l){ return a + (l.qty || 0); }, 0);
+  var noQty = (b.no_bids || []).reduce(function(a, l){ return a + (l.qty || 0); }, 0);
+  var total = yesQty + noQty;
+  if (total < 1) return null;
+  return {lean:clamp((yesQty - noQty) / total, -1, 1), yesQty:yesQty, noQty:noQty};
+}
 function kalshiFee(){ var f = parseFloat($('kalshiFee').value); return isFinite(f) && f > 0 ? f / 100 : 0; }
 /* Buying Up costs Kalshi's Yes ask, buying Down its No ask. The edge is what the model thinks it is worth minus that price and the fee. */
 function kalshiEdge(kx, mo){
@@ -1758,6 +1803,13 @@ function renderKalshi(){
     if (ed) list.push(['Edge buying Up / Down, after fee', (ed.up == null ? '\u2014' : (ed.up >= 0 ? '+' : '\u2212') + Math.abs(ed.up).toFixed(1)) + ' / ' + (ed.down == null ? '\u2014' : (ed.down >= 0 ? '+' : '\u2212') + Math.abs(ed.down).toFixed(1)) + ' pts']);
     var imp = kalshiImpliedRange(kx, mo), livePx = mo.S;
     if (imp) list.push(['Implied price from Kalshi\u2019s market', fmt(imp.lo) + '\u2013' + fmt(imp.hi) + '  (vs. live ' + fmt(livePx) + ', ' + (imp.mid >= livePx ? '+' : '\u2212') + fmt(Math.abs(imp.mid - livePx)) + ')']);
+  }
+  var kbFresh = kalshiBookFresh();
+  if (kbFresh){
+    var kbLean = kalshiBookLean(E);
+    list.push(['Book imbalance (Yes vs No bids)', kbLean ? (kbLean.yesQty.toFixed(0) + ' / ' + kbLean.noQty.toFixed(0) + '  (' + (kbLean.lean >= 0 ? '+' : '−') + Math.abs(kbLean.lean * 100).toFixed(0) + '% toward ' + (kbLean.lean >= 0 ? 'Up' : 'Down') + ')') : 'book is for a different window, not used']);
+  } else {
+    list.push(['Book imbalance', kalshiBook.msg || 'waiting for the first orderbook reading…']);
   }
   list.push(['Age of the reading', (kx.age / 1000).toFixed(1) + ' s' + (kalshi.rt ? '  (round trip ' + kalshi.rt + ' ms)' : '')]);
   body.innerHTML = '';
@@ -2541,6 +2593,14 @@ function computeMomentumRaw(){
     var ethBtcName = 'ETH/BTC relative strength, 30 min';
     items.push({name:ethBtcName, src:'Crypto.com', val:'ETH ' + signedPct(eb.ethR, 2) + '% vs BTC ' + signedPct(eb.btcR, 2) + '%', lean:eb.lean});
     factors.push(wl(ethBtcName, eb.lean));
+  }
+  if ($('kalshiOn').checked){
+    var kb = kalshiBookLean(expiryMs(Date.now()));
+    if (kb){
+      var kbName = 'Kalshi book imbalance (Yes vs No bids)';
+      items.push({name:kbName, src:'Kalshi', val:kb.yesQty.toFixed(0) + ' Yes / ' + kb.noQty.toFixed(0) + ' No', lean:kb.lean});
+      factors.push(wl(kbName, kb.lean));                                     // the contract's own resting orders, not another read of BTC spot/futures
+    }
   }
   var comp = factors.reduce(function(a, x){ return a + x; }, 0) / factors.length;
   return {items:items, composite:comp, factors:factors.length, votes:factors.slice(), spike:!!(sig && sig.spike), sig:sig};
@@ -5062,7 +5122,7 @@ $('refpMainOn').checked = get('cs_refp_main_on_v1', '0') === '1';
 $('refpMainOn').addEventListener('change', function(){ put('cs_refp_main_on_v1', $('refpMainOn').checked ? '1' : '0'); if ($('refpMainOn').checked) refpricePoll(); tick(); });
 $('kalshiBlockOn').checked = get('cs_kalshi_block_v1', '0') === '1';
 $('kalshiMinEdge').value = get('cs_kalshi_minedge_v1', '4');
-$('kalshiOn').addEventListener('change', function(){ put('cs_kalshi_on_v1', $('kalshiOn').checked ? '1' : '0'); kalshi.pausedUntil = 0; kalshi.lastStart = 0; kalshi.msg = ''; if ($('kalshiOn').checked) kalshiPoll(); tick(); });
+$('kalshiOn').addEventListener('change', function(){ put('cs_kalshi_on_v1', $('kalshiOn').checked ? '1' : '0'); kalshi.pausedUntil = 0; kalshi.lastStart = 0; kalshi.msg = ''; kalshiBook.pausedUntil = 0; kalshiBook.lastStart = 0; kalshiBook.msg = ''; if ($('kalshiOn').checked){ kalshiPoll(); kalshiBookPoll(); } tick(); });
 $('kalshiEvery').addEventListener('change', function(){ put('cs_kalshi_every_v1', $('kalshiEvery').value); tick(); });
 $('kalshiFee').addEventListener('input', function(){ put('cs_kalshi_fee_v1', $('kalshiFee').value); tick(); });
 $('kalshiAutoStrike').addEventListener('change', function(){ put('cs_kalshi_autostrike_v1', $('kalshiAutoStrike').checked ? '1' : '0'); kalshi.autoNote = ''; kalshiMaybeAutoStrike(); tick(); });
@@ -5194,6 +5254,7 @@ setInterval(coinbaseAcctPoll, CDC_EVERY_MS);
 setInterval(newsPoll, NEWS_EVERY_MS);
 setInterval(avPricePoll, AV_PRICE_EVERY_MS);
 setInterval(kalshiPoll, 1000);
+setInterval(kalshiBookPoll, 1000);
 setInterval(kalshiLivePoll, 1000);
 refpricePoll();
 setInterval(refpricePoll, 5000);
