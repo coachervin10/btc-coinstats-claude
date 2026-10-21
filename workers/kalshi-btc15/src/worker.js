@@ -253,6 +253,26 @@ async function toolMarket(args, env) {
   return ok(shapeMarket(m, now, at));
 }
 
+/* Unlike loadMarkets() above, Kalshi's own /orderbook endpoint has no cache of its own, and this
+   page's kalshiBookPoll() shares the same refresh cadence as kalshiPoll() (kalshiEvery, 3s by
+   default) -- two independent pollers each calling it every tick. Kalshi's orderbook endpoint
+   turns out to have a tighter per-IP rate limit than /markets, which that combined load trips
+   (HTTP 429). Fixed by always fetching the deepest ladder (20 levels) Kalshi allows and caching
+   the raw reply briefly per ticker, same in-flight-sharing pattern as loadMarkets(); toolBook()
+   then slices locally to whatever depth was actually asked for, so a cache hit serves any depth. */
+const bookCache = { at: 0, ticker: null, body: null, pending: null };
+const BOOK_CACHE_MS = 2000;
+async function loadBook(ticker) {
+  if (bookCache.body && bookCache.ticker === ticker && Date.now() - bookCache.at < BOOK_CACHE_MS) return { body: bookCache.body, at: bookCache.at };
+  if (!bookCache.pending || bookCache.ticker !== ticker) {
+    bookCache.ticker = ticker;
+    bookCache.pending = kalshiGet('/markets/' + encodeURIComponent(ticker) + '/orderbook?depth=20')
+      .then((body) => { bookCache.body = body; bookCache.at = Date.now(); return { body, at: bookCache.at }; })
+      .finally(() => { bookCache.pending = null; });
+  }
+  return bookCache.pending;
+}
+
 async function toolBook(args, env) {
   args = args || {};
   let depth = 5;
@@ -269,8 +289,8 @@ async function toolBook(args, env) {
   const now = Date.now();
   const m = pickMarket(body && body.markets, now);
   if (!m) return fail('No open KXBTC15M market was found in Kalshi\'s reply. It may be between windows; try again in a few seconds.');
-  const raw = await kalshiGet('/markets/' + encodeURIComponent(m.ticker) + '/orderbook?depth=' + depth);
-  const b = parseBook(raw);
+  const raw = await loadBook(m.ticker);
+  const b = parseBook(raw.body);
   const top = (a) => a.slice(0, depth);
   const data = {
     ok: true, ticker: m.ticker, target: m.target, seconds_left: Math.max(0, Math.round((m.closeMs - now) / 1000)),
