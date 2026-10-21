@@ -5298,8 +5298,14 @@ $('syncCoinbaseBalance').addEventListener('click', function(){
     return;
   }
   clearTimeout(syncBalTimer); syncBalTimer = null; b.textContent = 'Set balance from Coinbase cash';
-  paper = {balance:cash, bets:[]}; savePaper(); renderLedger();
-  note.textContent = 'Paper balance set to ' + money(cash) + ', matching your real Coinbase cash as of the last refresh. Still fake money -- no real funds moved.';
+  /* Only the balance changes here -- every past bet stays exactly as it was. dayStart (today's
+     20%-loss-cap baseline) is shifted by the same amount so this sync is never mistaken for a
+     trading gain or loss: without that adjustment, a balance jump from syncing could trip the
+     daily loss cap for a reason that has nothing to do with how today's trades actually did, or
+     mask a real loss behind an unrelated cash top-up. */
+  if (typeof paper.dayStart === 'number') paper.dayStart += cash - paper.balance;
+  paper.balance = cash; savePaper(); renderLedger();
+  note.textContent = 'Paper balance set to ' + money(cash) + ', matching your real Coinbase cash as of the last refresh. Your trade history is untouched. Still fake money -- no real funds moved.';
 });
 setInterval(function(){ if (!document.hidden && $('live').checked && (!vol || Date.now() - vol.at > chartEvery())) refreshChart(); }, 15000);
 
