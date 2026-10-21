@@ -120,6 +120,18 @@ jobs:
           workingDirectory: workers/refprice-proxy
           command: deploy
 
+  deploy-deribit-iv-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Deribit's public options market-data endpoint needs no API key either.
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/deribit-iv-proxy
+          command: deploy
+
   deploy-site:
     runs-on: ubuntu-latest
     needs:
@@ -129,6 +141,7 @@ jobs:
       - deploy-paper-store
       - deploy-kalshi-btc15
       - deploy-refprice-proxy
+      - deploy-deribit-iv-proxy
     steps:
       - uses: actions/checkout@v4
       - name: Fill in Worker URLs

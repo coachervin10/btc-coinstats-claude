@@ -1,0 +1,14 @@
+name = "deribit-iv-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# Deribit's public options market-data endpoint needs no API key, so this worker has no secrets
+# to set. It fetches every live BTC option in one call, picks the nearest-to-the-money strike at
+# the nearest expiry that's at least 20 hours out (skipping 0DTE pin/gamma noise), and returns
+# that strike's mark implied vol as a forward-looking second opinion against this page's own
+# realized-vol blend. See src/worker.js for the full rationale.
+
+[vars]
+# Seconds to cache the result at Cloudflare's edge. Implied vol on a 20h+ option doesn't move
+# fast enough to need sub-minute freshness.
+IV_CACHE_S = "30"

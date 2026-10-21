@@ -4,7 +4,7 @@ This is a standalone rebuild of a BTC/USD paper-trading tracker that originally 
 Claude artifact (reading CoinStats, Crypto.com, Alpha Vantage and Kalshi through Claude's own
 MCP connectors). It now runs as:
 
-- six small **Cloudflare Workers** (`workers/*`) that each proxy one or more upstream data
+- seven small **Cloudflare Workers** (`workers/*`) that each proxy one or more upstream data
   sources, reshaping responses so the page's existing parsing code didn't need to change
 - one **static page** (`site/coinstats-btc.html`) that calls those Workers directly with
   `fetch()` — no Claude account, connector, or artifact needed to use it
@@ -248,6 +248,23 @@ Two more additions to `site/coinstats-btc.html`:
   here, worth switching on and then checking back in the calibration table once it's accumulated
   bets.
 
+## Deribit implied-vol cross-check
+
+A third addition rounding out the model-accuracy batch: a new, no-key `deribit-iv-proxy` Worker
+that reads Deribit's public options market (`get_book_summary_by_currency`) and reports the mark
+implied vol of the near-the-money BTC option at the nearest expiry at least 20 hours out (skipping
+0DTE pin/gamma noise). Everything else this page uses to size volatility — the `vol.fast`/`vol.slow`
+blend — is backward-looking: it only ever measures what volatility already *was* over a trailing
+window. Implied vol is forward-looking: it's the options market's own best guess at what
+volatility will be between now and that option's expiry, which reacts faster than realized vol
+right as a regime shifts into or out of a scheduled event. Shown as an informational line in the
+volatility note next to the existing realized-vol text (annualized percent and days-to-expiry of
+the option it came from, converted to the same "per 5 minutes" scale used elsewhere on the page)
+— it is never applied to any calculation, purely a second opinion to eyeball. On by default
+(`#useDeribitIv`, display-only, same reasoning as the always-on Kalshi implied-range display) but
+degrades silently to nothing shown if Deribit's options data doesn't parse (e.g. no live option at
+least 20 hours from expiry).
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run
@@ -289,8 +306,9 @@ workers/
   kalshi-btc15/        Kalshi 15-min BTC market (existing MCP route + new REST routes)
   paper-store/         D1-backed cross-device paper-trading persistence
   refprice-proxy/      Coinbase/Kraken/Bitstamp/Gemini/Bullish/itBit volume-weighted reference price (no key needed)
+  deribit-iv-proxy/    Deribit near-the-money BTC option implied vol, forward-looking (no key needed)
 site/
   coinstats-btc.html   the standalone page; publish target for Cloudflare Pages
 .github/workflows/
-  deploy.yml           deploys all six Workers + the page on push to main
+  deploy.yml           deploys all seven Workers + the page on push to main
 ```

@@ -200,6 +200,7 @@ body.view-simple .adv{ display:none !important; }
           </select>
         </div>
         <label class="row" style="margin:0 0 8px;"><input type="checkbox" id="fat" checked><span>fat-tailed odds (Student-t) instead of a normal curve</span></label>
+        <label class="row" style="margin:0 0 8px;"><input type="checkbox" id="useDeribitIv" checked><span>show Deribit's own forward-looking implied vol next to the volatility reading, for comparison (never applied to the odds — display only)</span></label>
         <div class="target-row" style="margin:0 0 14px;">
           <label for="driftHr" class="prob-meta">Your own drift view (% per hour)</label>
           <input type="number" id="driftHr" step="0.01" value="0" style="width:90px;" aria-label="Assumed drift in percent per hour">
@@ -977,6 +978,7 @@ var API_BASE = {
   kalshi: 'https://kalshi-btc15.__CF_SUBDOMAIN__.workers.dev',
   paperstore: 'https://paper-store.__CF_SUBDOMAIN__.workers.dev',
   refprice: 'https://refprice-proxy.__CF_SUBDOMAIN__.workers.dev',
+  deribit: 'https://deribit-iv-proxy.__CF_SUBDOMAIN__.workers.dev',
 };
 var serverName = 'coinstats';
 /**
@@ -1014,6 +1016,10 @@ async function callApi(server, tool, input){
     base = API_BASE.refprice;
     if (tool === 'get-vwap') path = '/api/vwap';
     else throw {code:'bad_shape', message:'refprice-proxy has no route for ' + tool};
+  } else if (server === 'deribit'){
+    base = API_BASE.deribit;
+    if (tool === 'get-iv') path = '/api/iv';
+    else throw {code:'bad_shape', message:'deribit-iv-proxy has no route for ' + tool};
   } else {
     throw {code:'bad_shape', message:'no proxy configured for server ' + server};
   }
@@ -1787,6 +1793,46 @@ async function refpricePoll(){
     try { renderRefp(); } catch (e) { /* optional display only -- never let it skip the tick() call below */ }
     tick();
   }
+}
+/* ---------- Deribit implied vol: a forward-looking second opinion on volatility ----------
+   The realized-vol blend above is entirely backward-looking (trailing realized windows). This is
+   the market's own forward view, from the nearest BTC option at least 20 hours from expiry, at
+   Deribit's public, no-key options market (deribit-iv-proxy picks the strike and expiry; see that
+   worker for why). Purely informational, same stance as the Kalshi-implied-price comparison
+   elsewhere on this page -- it is never substituted into vol.perSec or any odds calculation on its
+   own. Slow-moving by nature (a 20h+ option's IV doesn't need sub-minute freshness), so this polls
+   far less often than the price/order-flow feeds. */
+var deribitIv = {data:null, busy:false, fails:0, recvAt:0, notConfigured:false};
+var DERIBIT_EVERY_MS = 90000;
+async function deribitPoll(){
+  if (sessionClosed || deribitIv.busy || document.hidden || !$('useDeribitIv').checked) return;
+  if (deribitIv.data && Date.now() - deribitIv.recvAt < DERIBIT_EVERY_MS) return;
+  deribitIv.busy = true;
+  try {
+    var res = await callApi('deribit', 'get-iv', {});
+    var d = res && res.payload;
+    if (d && d.ok && typeof d.mark_iv === 'number'){
+      deribitIv.data = d; deribitIv.recvAt = Date.now(); deribitIv.fails = 0; deribitIv.notConfigured = false;
+    } else {
+      deribitIv.fails++;
+      if (deribitIv.fails >= 3) deribitIv.notConfigured = true;
+    }
+  } catch (e) {
+    deribitIv.fails++;
+    if (deribitIv.fails >= 3) deribitIv.notConfigured = true;
+  } finally {
+    deribitIv.busy = false;
+    tick();
+  }
+}
+/* Deribit's mark_iv is an annualized vol (standard options convention) -- converted here to the
+   same "percent move per 5 minutes" units volDetail already uses, so the two numbers in volNote
+   sit side by side on equal footing instead of making the reader convert one in their head. */
+function deribitIvPer5(){
+  if (!$('useDeribitIv').checked || !deribitIv.data) return null;
+  var annualPct = deribitIv.data.mark_iv;         // already a percent, e.g. 55 for 55%
+  var per5 = (annualPct / 100) * Math.sqrt(5 / (365 * 24 * 60));
+  return {per5pct:per5 * 100, days:deribitIv.data.days_to_expiry, annualPct:annualPct};
 }
 /* Volume trend over the last ~60s: how much total cross-exchange 24h volume rose (or fell) since
    the oldest sample still within that window. A rising total means fresh trading activity is
@@ -3498,7 +3544,9 @@ function renderOdds(){
   var curRiskPct = paper.balance > 0 ? curStakePay / paper.balance * 100 : 0;
   $('payNote').textContent = 'Over costs ' + Math.round(cO * 100) + '\u00a2 and gains ' + Math.round((1 - cO) * 100) + '\u00a2 per contract if right. Under costs ' + Math.round(cU * 100) + '\u00a2 and gains ' + Math.round((1 - cU) * 100) + '\u00a2. A win pays $1 per contract. The ' + curContractsPay + ' in the box now would cost ' + money(curStakePay) + ' (' + curRiskPct.toFixed(1) + '% of balance).';
   $('barFill').style.width = (o.pAbove * 100) + '%';
-  $('volNote').textContent = 'Volatility used: ' + (o.perSec * Math.sqrt(300) * 100).toFixed(3) + '% per 5 minutes (from ' + o.volSrc + ')' + (o.mult > 1 ? ' \u00d7 ' + o.mult + ' for ' + o.multReason : '') + ' \u00b7 ' + ($('fat').checked ? 'fat-tailed odds' : 'normal-curve odds') + '. Readings per 5 minutes: ' + o.volDetail + '.';
+  var divIv = deribitIvPer5();
+  $('volNote').textContent = 'Volatility used: ' + (o.perSec * Math.sqrt(300) * 100).toFixed(3) + '% per 5 minutes (from ' + o.volSrc + ')' + (o.mult > 1 ? ' \u00d7 ' + o.mult + ' for ' + o.multReason : '') + ' \u00b7 ' + ($('fat').checked ? 'fat-tailed odds' : 'normal-curve odds') + '. Readings per 5 minutes: ' + o.volDetail + '.' +
+    (divIv ? ' Deribit\u2019s own forward-looking read (the ' + divIv.days.toFixed(1) + '-day near-ATM option\u2019s implied vol, ' + divIv.annualPct.toFixed(0) + '% annualized): ' + divIv.per5pct.toFixed(3) + '% per 5 minutes \u2014 informational only, never applied.' : '');
   var leanTxt = o.lean == null ? '' : (o.lean >= 0 ? '+' : '\u2212') + Math.abs(o.lean).toFixed(2);
   var vts = (o.mom && o.mom.votes) || [], vUp = vts.filter(function(v){ return v >= 0.1; }).length, vDn = vts.filter(function(v){ return v <= -0.1; }).length;
   var sideNow = o.pAbove >= 0.5 ? 'above' : 'below', beNow = ((sideNow === 'above' ? o.pManual : 1 - o.pManual) - 0.5) * 100;
@@ -4803,6 +4851,8 @@ $('live').addEventListener('change', function(){
 });
 $('strike').value = get(K.strike, ''); $('period').value = get(K.period, '15'); $('stake').value = get(K.stake, '10'); $('momMode').value = get(K.momMode, get(K.mom, '1') === '0' ? 'off' : 'nudge'); $('driftHr').value = get(K.drift, '0');
 $('news').checked = get(K.news, '0') === '1'; $('fat').checked = get(K.fat, '1') !== '0'; $('useCdc').checked = get(K.cdc, '1') !== '0';
+$('useDeribitIv').checked = get('cs_use_deribit_iv_v1', '1') !== '0';
+$('useDeribitIv').addEventListener('change', function(){ put('cs_use_deribit_iv_v1', $('useDeribitIv').checked ? '1' : '0'); if ($('useDeribitIv').checked) deribitPoll(); else { deribitIv.data = null; } tick(); });
 $('useEthBtc').checked = get('cs_use_ethbtc_v1', '0') === '1';
 $('useEthBtc').addEventListener('change', function(){ put('cs_use_ethbtc_v1', $('useEthBtc').checked ? '1' : '0'); if ($('useEthBtc').checked) ethBtcPoll(); else { ethBtc.candles5 = null; ethBtc.msg = ''; } renderEthBtc(); tick(); });
 $('strike').addEventListener('input', onStrikeInput);
@@ -5031,6 +5081,7 @@ renderTable(); renderLedger(); tick();
 setInterval(tick, 1000);
 setInterval(cdcPoll, CDC_EVERY_MS);
 setInterval(ethBtcPoll, CDC_EVERY_MS);
+setInterval(deribitPoll, CDC_EVERY_MS);
 setInterval(newsPoll, NEWS_EVERY_MS);
 setInterval(avPricePoll, AV_PRICE_EVERY_MS);
 setInterval(kalshiPoll, 1000);
@@ -5042,6 +5093,7 @@ setTimeout(khTick, 6000);
 setInterval(tapePoll, 3000);
 cdcPoll();
 ethBtcPoll();
+deribitPoll();
 if ($('live').checked && !sessionClosed){ start(); refreshChart(); }
 })();
 </script>
