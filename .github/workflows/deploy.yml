@@ -137,9 +137,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # COINBASE_CDP_KEY_NAME / COINBASE_CDP_PRIVATE_KEY are optional -- the worker degrades to a
-      # quiet "not configured" response if they're unset, so this job always succeeds even before
-      # you've created a Coinbase API key. See workers/coinbase-balance-proxy/wrangler.toml.
-      - uses: cloudflare/wrangler-action@v3
+      # quiet "not configured" response if they're unset. wrangler-action's `secrets:` input
+      # fails outright if the named secret doesn't exist in the repo yet, so the deploy itself and
+      # the (optional) secret upload are split into two steps: the first always succeeds, the
+      # second only runs once you've actually added the two repo secrets (see README.md).
+      - name: Deploy worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/coinbase-balance-proxy
+          command: deploy
+      - name: Check whether the Coinbase API key secrets are set
+        id: coinbase_secrets
+        env:
+          COINBASE_CDP_KEY_NAME: ${{ secrets.COINBASE_CDP_KEY_NAME }}
+        run: echo "configured=$([ -n \"$COINBASE_CDP_KEY_NAME\" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Upload Coinbase API key secrets, once you've added them
+        if: steps.coinbase_secrets.outputs.configured == 'true'
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
