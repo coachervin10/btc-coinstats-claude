@@ -227,6 +227,27 @@ itself rather than sizing or risk management:
   affects Kelly sizing) — this one changes the probability estimate itself, which is why it stays
   opt-in until the calibration table has enough data to actually trust.
 
+## Momentum proportionality check, and an ETH/BTC relative-strength signal
+
+Two more additions to `site/coinstats-btc.html`:
+
+- **Momentum proportionality.** "Nudge" mode (the default way momentum enters the odds) shifts
+  the odds by up to a flat 8 points at full momentum strength — a constant that had never been
+  checked against what actually happened. A new table in Indicator calibration buckets decided
+  bets by how strongly momentum agreed with the side taken and compares the win rate each bucket
+  actually realized against what that 8-point constant predicted for nudge-mode bets in it, so
+  "is stronger momentum actually proportionally more valuable, or does it plateau" has a real
+  answer instead of a guess. Purely a read-only diagnostic — doesn't change the constant itself.
+- **ETH/BTC relative strength.** A new, off-by-default vote in the Order flow card: whether ETH
+  is outperforming or underperforming BTC over the same 30 minutes, using the same no-key
+  `cryptocom-proxy` Worker already used for everything else here (just a second
+  `instrument_name` — no new Worker needed). Every other reading on this page is some transform
+  of BTC's own price, volume or order book; this is the one genuinely independent signal, read as
+  broad crypto-market risk-on/risk-off strength rather than BTC's own (already-captured)
+  momentum. New and unproven, so it's off by default — same spirit as everything else optional
+  here, worth switching on and then checking back in the calibration table once it's accumulated
+  bets.
+
 ## How cross-device sync works
 
 There's no real login. The page generates a random token (`crypto.randomUUID()`) on first run

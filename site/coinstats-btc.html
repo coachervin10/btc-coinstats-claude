@@ -324,8 +324,10 @@ body.view-simple .adv{ display:none !important; }
           Crypto.com when its signals are on, falling back to bars built by joining three of CoinStats' 5-minute points otherwise (marked
           "approx.", with approximate highs and lows). The 30-minute change and a 1-minute EMA cross use real Crypto.com candles at those
           timeframes; the 2-minute change comes from this page's own live prices; and the order book, taker flow, volume, CVD, open interest,
-          funding rate and basis come from Crypto.com's trade, book and derivatives data when ticked. It can only shift the odds a little; the
-          size of the move needed to reach your strike still does most of the work. Abnormal volume (over 3 times the
+          funding rate and basis come from Crypto.com's trade, book and derivatives data when ticked. ETH/BTC relative strength (its own
+          optional vote, off by default) is the one reading here that isn't some transform of BTC's own price or order book &mdash; it's
+          whether ETH is outperforming or underperforming BTC over the same 30 minutes, also from Crypto.com. It can only shift the odds a
+          little; the size of the move needed to reach your strike still does most of the work. Abnormal volume (over 3 times the
           norm) widens the odds instead of pointing a direction. Momentum can enter the odds two ways: as a flat nudge of up to 8 points,
           or as a drift, which shifts where the price is expected to end up. A drift matters most near the strike and fades for
           strikes far away, which is how a real drift would behave.
@@ -337,6 +339,8 @@ body.view-simple .adv{ display:none !important; }
         <label class="row" style="margin-bottom:10px;"><input type="checkbox" id="useCdc" checked><span>use Crypto.com's order book, taker flow, volume, open interest and funding rate as signals. The price itself stays CoinStats-only.</span></label>
         <svg id="flowChart" role="img" aria-label="Order book imbalance and taker flow over the last 15 minutes"></svg>
         <div class="prob-meta" id="flowNote" style="margin-top:8px;"></div>
+        <label class="row" style="margin-top:10px;"><input type="checkbox" id="useEthBtc"><span>add ETH/BTC relative strength as its own vote &mdash; is ETH outperforming or underperforming BTC right now, read as broad crypto-market risk-on/risk-off strength rather than BTC's own (correlated) momentum. Off by default; a genuinely different signal from everything else here, but a new and untested one.</span></label>
+        <div class="prob-meta" id="ethBtcNote" style="margin-top:4px;"></div>
       </div>
 
       <div class="card adv" id="card-chart">
@@ -717,6 +721,17 @@ body.view-simple .adv{ display:none !important; }
           since this check was added have a saved reading.
         </div>
         <div class="prob-meta" id="divergenceSummary" style="margin-bottom:8px;"></div>
+        <div class="note" style="margin-top:14px; padding-top:14px;">
+          <strong>Momentum proportionality</strong> &mdash; "Nudge" mode shifts the odds by up to 8 points at full
+          momentum strength, a fixed constant, never checked against what actually happened. This buckets decided
+          bets by how strongly momentum agreed with the side taken and compares the win rate each bucket actually
+          realized (as points above a coin flip) against what that constant predicted for nudge-mode bets in it.
+          Only tells you something for the bucket(s) with enough nudge-mode bets in them.
+        </div>
+        <table>
+          <thead><tr><th>Momentum agreement</th><th>n</th><th>Actual win% (95% range)</th><th>Predicted vs actual</th></tr></thead>
+          <tbody id="momPropBody"></tbody>
+        </table>
         <div class="note" style="margin-top:14px; padding-top:14px;">
           <strong>Calibration drift</strong> &mdash; compares your most recent bets against everything before them. A model that's
           quietly gotten worse (or better) since you last checked should show up here before it shows up as a losing streak.
@@ -2150,6 +2165,54 @@ function cdcSignals(){
   return out;
 }
 
+/* ---------- ETH/BTC relative strength: a genuinely independent signal, not another BTC-derived proxy ----------
+   Every other reading on this page is some transform of BTC's own price, volume or order book -- even after the
+   volume-vote merge, they're all one information source read several ways. This is a different one: whether ETH
+   is outperforming or underperforming BTC over the same stretch, from the same no-key cryptocom-proxy Worker
+   already used for everything else here (just a second instrument_name -- no new Worker needed). Read as broad
+   risk-on/risk-off strength spilling into BTC's own next move, not as "ETH went up so BTC will too" (that would
+   just be the correlated BTC-beta everything else already captures). Off by default like the other optional
+   secondary signals (useCdc's own sub-toggles, avPriceOn, refpMainOn) until it's actually shown something. */
+var ethBtc = {candles5:null, at:0, msg:'', busy:false, fails:0};
+var ETHBTC_EVERY_MS = 60000;
+async function ethBtcPoll(){
+  if (sessionClosed || ethBtc.busy || document.hidden || !$('useEthBtc').checked) return;
+  if (ethBtc.candles5 && Date.now() - ethBtc.at < ETHBTC_EVERY_MS) return;
+  ethBtc.busy = true;
+  try {
+    var res = await cdcCall('get_candlestick', {instrument_name:'ETH_USD', timeframe:'5m'});
+    var cd = readObj(res, 'data');
+    if (!cd) throw {code:'bad_shape', message:'Crypto.com returned data this page could not read for ETH_USD'};
+    ethBtc.candles5 = parseCandles(cd); ethBtc.at = Date.now(); ethBtc.fails = 0; ethBtc.msg = '';
+  } catch (e) {
+    ethBtc.fails++; ethBtc.msg = 'ETH/BTC signal unavailable: ' + describe(e);
+    if (ethBtc.fails >= 3) ethBtc.candles5 = null;
+  } finally { ethBtc.busy = false; tick(); }
+}
+/* Same 30-minute log-return comparison the BTC trend factor (l3) already makes for BTC alone, just for ETH too,
+   then the DIFFERENCE between them -- normalized against BTC's own volatility scale, since building a whole
+   second volatility model just for this one auxiliary signal isn't worth it (this is deliberately approximate;
+   the note on the card says so). */
+function ethBtcLean(){
+  if (!$('useEthBtc').checked || !vol || !cdc.candles30 || cdc.candles30.length < 2 || !ethBtc.candles5 || Date.now() - ethBtc.at > 180000) return null;
+  var ec = ethBtc.candles5.filter(function(c){ return isFinite(c.close); });
+  if (ec.length < 7) return null;
+  var ethNow = ec[ec.length - 1].close, ethPrev = ec[ec.length - 7].close;        // 6 bars back = 30 minutes
+  if (!(ethNow > 0 && ethPrev > 0)) return null;
+  var ethR = Math.log(ethNow / ethPrev);
+  var btcC = cdc.candles30, btcR = Math.log(btcC[btcC.length - 1].close / btcC[btcC.length - 2].close);
+  var diff = ethR - btcR, lean = clamp(diff / (2 * vol.slow * Math.sqrt(6)), -1, 1);
+  return {lean:lean, ethR:ethR, btcR:btcR};
+}
+function renderEthBtc(){
+  var el = $('ethBtcNote');
+  if (!el) return;
+  if (!$('useEthBtc').checked){ el.textContent = ''; return; }
+  var r = ethBtcLean();
+  if (!r){ el.textContent = ethBtc.msg || 'Waiting for enough ETH and BTC 30-minute history.'; return; }
+  el.textContent = 'ETH ' + signedPct(r.ethR, 2) + '%, BTC ' + signedPct(r.btcR, 2) + '% over the last 30 min — lean ' + (r.lean >= 0 ? '+' : '−') + Math.abs(r.lean).toFixed(2) + ' (' + (r.lean >= 0 ? 'ETH relatively stronger' : 'ETH relatively weaker') + ').';
+}
+
 /* ---------- momentum ---------- */
 function ema(a, n){ var k = 2 / (n + 1), out = [a[0]]; for (var i = 1; i < a.length; i++) out.push(a[i] * k + out[i - 1] * (1 - k)); return out; }
 function rsi(c, period){
@@ -2343,6 +2406,12 @@ function computeMomentumRaw(){
     var bl = clamp(bps / (Math.max(avgAbs, 2) * 2), -1, 1), basisName = 'Mark/index basis';
     items.push({name:basisName, src:'Crypto.com', val:(bps >= 0 ? '+' : '\u2212') + Math.abs(bps).toFixed(1) + 'bps (recent avg ' + avgAbs.toFixed(1) + ')', lean:bl});
     factors.push(wl(basisName, bl));
+  }
+  var eb = ethBtcLean();
+  if (eb){
+    var ethBtcName = 'ETH/BTC relative strength, 30 min';
+    items.push({name:ethBtcName, src:'Crypto.com', val:'ETH ' + signedPct(eb.ethR, 2) + '% vs BTC ' + signedPct(eb.btcR, 2) + '%', lean:eb.lean});
+    factors.push(wl(ethBtcName, eb.lean));
   }
   var comp = factors.reduce(function(a, x){ return a + x; }, 0) / factors.length;
   return {items:items, composite:comp, factors:factors.length, votes:factors.slice(), spike:!!(sig && sig.spike), sig:sig};
@@ -3104,6 +3173,61 @@ function renderDivergenceCheck(){
   if (!d.enough){ el.textContent = 'Needs at least ' + d.need + ' settled bets with a saved price-source reading to check (have ' + d.have + ').'; return; }
   el.textContent = 'Split at the median (' + d.medianPct.toFixed(3) + '% spread): lower-divergence ' + d.lowN + ' bets, ' + Math.round(d.lowWin * 100) + '% won; higher-divergence ' + d.hiN + ' bets, ' + Math.round(d.hiWin * 100) + '% won. ' + d.read + '.';
 }
+/* ---------- does momentum's size actually predict its win rate, proportionally? ----------
+   "Nudge" mode (the default) shifts the odds by (aligned momentum composite) x MAX_LEAN_POINTS, a fixed 8-point
+   ceiling never checked against results. Only bets where momentum agreed with the side taken are counted here
+   (aligned >= 0) -- the question is specifically whether STRONGER agreement has actually paid off proportionally
+   more, not whether momentum helps at all (that's what the per-indicator calibration table above already checks,
+   reading-by-reading rather than on the composite). The "predicted" column only has a number where there are
+   actual nudge-mode bets in that bucket to compute it from -- drift-mode and off-mode bets still count toward n
+   and the win rate, just not toward the predicted comparison. */
+var MOM_PROP_BUCKETS = [[0, 0.15], [0.15, 0.35], [0.35, 0.60], [0.60, 1.01]];
+var MOM_PROP_MIN_N = 15;
+function runMomentumProportionality(){
+  var decided = paper.bets.filter(function(b){ return (b.status === 'settled' || b.status === 'closed') && b.won !== null && typeof b.lean === 'number'; });
+  var buckets = MOM_PROP_BUCKETS.map(function(e){ return {lo:e[0], hi:e[1], n:0, wins:0, nudgeN:0, nudgeSum:0}; });
+  decided.forEach(function(b){
+    var aligned = b.side === 'above' ? b.lean : -b.lean;
+    if (aligned < 0) return;
+    var bk = buckets.filter(function(x){ return aligned >= x.lo && aligned < x.hi; })[0];
+    if (!bk) return;
+    bk.n++; if (b.won) bk.wins++;
+    if (b.momMode === 'nudge'){ bk.nudgeN++; bk.nudgeSum += aligned; }
+  });
+  var rows = buckets.filter(function(b){ return b.n > 0; }).map(function(b){
+    var winRate = b.wins / b.n, ci = wilsonInterval(b.wins, b.n), actualPts = (winRate - 0.5) * 100;
+    var predictedPts = b.nudgeN >= 5 ? (b.nudgeSum / b.nudgeN) * MAX_LEAN_POINTS : null;
+    var read = 'not enough decided bets yet (need ' + MOM_PROP_MIN_N + ')';
+    if (b.n >= MOM_PROP_MIN_N){
+      if (predictedPts == null) read = 'too few nudge-mode bets in this bucket to compare against a predicted size';
+      else {
+        var gap = actualPts - predictedPts;
+        read = Math.abs(gap) < 5 ? 'roughly matches what nudge mode assumes' : (gap < 0 ? 'overstated by about ' + Math.abs(gap).toFixed(0) + ' pts — momentum this strong hasn’t won as often as the constant assumes' : 'understated by about ' + Math.abs(gap).toFixed(0) + ' pts — momentum this strong has won more than the constant assumes');
+      }
+    }
+    return {lo:b.lo, hi:b.hi, n:b.n, winRate:winRate, ci:ci, actualPts:actualPts, predictedPts:predictedPts, read:read};
+  });
+  return {n:decided.length, rows:rows};
+}
+function renderMomentumProportionality(){
+  var r = runMomentumProportionality(), body = $('momPropBody');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!r.rows.length){
+    var tr = document.createElement('tr'), td = document.createElement('td');
+    td.colSpan = 4; td.style.color = 'var(--dim)'; td.textContent = 'No decided bets with a saved momentum reading yet.';
+    tr.appendChild(td); body.appendChild(tr); return;
+  }
+  r.rows.forEach(function(row){
+    var tr = document.createElement('tr');
+    function td(text, dim){ var d = document.createElement('td'); d.textContent = text; if (dim) d.style.color = 'var(--dim)'; tr.appendChild(d); }
+    td(row.lo.toFixed(2) + '–' + Math.min(row.hi, 1).toFixed(2));
+    td(String(row.n));
+    td(Math.round(row.winRate * 100) + '% (' + pctRange(row.ci) + ')');
+    td((row.predictedPts != null ? 'predicted ' + sgn(row.predictedPts) + 'pt, actual ' + sgn(row.actualPts) + 'pt — ' : '') + row.read, row.n < MOM_PROP_MIN_N || row.predictedPts == null);
+    body.appendChild(tr);
+  });
+}
 function runDrift(){
   var dec = paper.bets.filter(function(b){ return b.status === 'settled' && b.won !== null; }).sort(function(a, b){ return a.placedAt - b.placedAt; });
   var n = +$('driftRecentN').value || 30;
@@ -3550,6 +3674,7 @@ function tick(){
   if (settleDue()) renderLedger();
   try { shadowCheckCap(); renderShadow(); } catch (e) { /* rehearsal feature only -- never let it break the main tick */ }
   try { renderKellyPreview(); } catch (e) { /* display only -- never let it break the main tick */ }
+  try { renderEthBtc(); } catch (e) { /* display only -- never let it break the main tick */ }
   recordWindow();
   autoCloseCheck();
   $('trendNote').textContent = trendNoteText();
@@ -4625,7 +4750,7 @@ function startSession(){
   sessionClosed = false; put('cs_session_closed_v1', '0');
   $('live').checked = true; put(K.live, '1');
   sessionUI(); $('autoStatus').textContent = 'Auto-trading is off. Turn it on when you are ready.';
-  start(); refreshChart(); cdcPoll(); tapePoll(); tick();
+  start(); refreshChart(); cdcPoll(); ethBtcPoll(); tapePoll(); tick();
 }
 
 /* ---------- controls ---------- */
@@ -4678,6 +4803,8 @@ $('live').addEventListener('change', function(){
 });
 $('strike').value = get(K.strike, ''); $('period').value = get(K.period, '15'); $('stake').value = get(K.stake, '10'); $('momMode').value = get(K.momMode, get(K.mom, '1') === '0' ? 'off' : 'nudge'); $('driftHr').value = get(K.drift, '0');
 $('news').checked = get(K.news, '0') === '1'; $('fat').checked = get(K.fat, '1') !== '0'; $('useCdc').checked = get(K.cdc, '1') !== '0';
+$('useEthBtc').checked = get('cs_use_ethbtc_v1', '0') === '1';
+$('useEthBtc').addEventListener('change', function(){ put('cs_use_ethbtc_v1', $('useEthBtc').checked ? '1' : '0'); if ($('useEthBtc').checked) ethBtcPoll(); else { ethBtc.candles5 = null; ethBtc.msg = ''; } renderEthBtc(); tick(); });
 $('strike').addEventListener('input', onStrikeInput);
 $('stake').addEventListener('input', function(){ put(K.stake, $('stake').value); });
 $('period').addEventListener('change', function(){ put(K.period, $('period').value); tick(); });
@@ -4888,7 +5015,7 @@ $('copyExport').addEventListener('click', function(){
   else { box.focus(); box.select(); syncStatus('Select the text and copy it yourself (Ctrl+C or Cmd+C).'); }
 });
 $('importBtn').addEventListener('click', doImport);
-$('calibRun').addEventListener('click', function(){ renderCalibration(); renderProbCalibration(); renderDivergenceCheck(); renderDrift(); });
+$('calibRun').addEventListener('click', function(){ renderCalibration(); renderProbCalibration(); renderDivergenceCheck(); renderMomentumProportionality(); renderDrift(); });
 $('calibShrinkOn').checked = get('cs_calib_shrink_on_v1', '1') === '1';
 $('calibShrinkOn').addEventListener('change', function(){ put('cs_calib_shrink_on_v1', $('calibShrinkOn').checked ? '1' : '0'); probCalibMemo = null; tick(); });
 $('calibWeightOn').checked = get('cs_calib_weight_on_v1', '0') === '1';
@@ -4903,6 +5030,7 @@ syncInit();
 renderTable(); renderLedger(); tick();
 setInterval(tick, 1000);
 setInterval(cdcPoll, CDC_EVERY_MS);
+setInterval(ethBtcPoll, CDC_EVERY_MS);
 setInterval(newsPoll, NEWS_EVERY_MS);
 setInterval(avPricePoll, AV_PRICE_EVERY_MS);
 setInterval(kalshiPoll, 1000);
@@ -4913,6 +5041,7 @@ setInterval(khTick, 30000);
 setTimeout(khTick, 6000);
 setInterval(tapePoll, 3000);
 cdcPoll();
+ethBtcPoll();
 if ($('live').checked && !sessionClosed){ start(); refreshChart(); }
 })();
 </script>
