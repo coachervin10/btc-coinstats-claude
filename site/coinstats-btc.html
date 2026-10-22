@@ -507,6 +507,13 @@ body.view-simple .adv{ display:none !important; }
           </select>
           <span class="prob-meta">before betting (filters a brief flicker from a stable reading)</span>
         </div>
+        <label class="row" style="margin:10px 0 4px;"><input type="checkbox" id="autoLiqTrigger"><span>let a strong, CVD-confirmed liquidity sweep place a bet immediately &mdash; skips the window-timing, signal-strength, indicator-vote, trend, re-entry and near-a-key-level gates above (a sweep fires at a key level and is itself the signal), and skips the hold-for-confirmation delay. Still has to clear price-adjustment stability, strike sanity, the Kalshi edge/contract-price bounds, and the same-side loss-streak breaker. Off by default &mdash; faster and less confirmed than everything else here.</span></label>
+        <div class="target-row" id="liqTriggerWickRow" style="margin:4px 0 10px;">
+          <label for="liqTriggerWick" class="prob-meta">Minimum wick to qualify</label>
+          <select id="liqTriggerWick" aria-label="Minimum share of the sweep bar that must be wick, to instant-trigger">
+            <option value="0.5">50%</option><option value="0.6">60%</option><option value="0.65" selected>65%</option><option value="0.7">70%</option><option value="0.8">80%</option>
+          </select>
+        </div>
         <div class="target-row" style="margin:6px 0 10px;">
           <label for="autoSize" class="prob-meta">Size</label>
           <select id="autoSize" aria-label="How many contracts auto-trading buys">
@@ -3092,7 +3099,7 @@ function placeBet(side, opts){
   var isReentry = !!reCtxNow;
   paper.balance -= stake;
   var leftMs = o.E - Date.now();
-  var newBet = {id:Date.now(), placedAt:Date.now(), leftMs:leftMs, periodMin:(+$('period').value || 15), side:side, strike:o.K, expiry:o.E, stake:stake, contracts:contracts, price:cprice, prob:prob, pBase:side === 'above' ? o.pBase : 1 - o.pBase, lean:o.lean, sdUsd:o.sdUsd, volMult:o.mult, mu:o.mu, momMode:o.momMode, entryPrice:o.S, entryPerSec:o.perSec, volCands:o.volCands, kalshi:kalshiSnapshot(side, o), origContracts:contracts, status:'open', auto:!!opts.auto, tier:opts.tier || null, reentry:isReentry,
+  var newBet = {id:Date.now(), placedAt:Date.now(), leftMs:leftMs, periodMin:(+$('period').value || 15), side:side, strike:o.K, expiry:o.E, stake:stake, contracts:contracts, price:cprice, prob:prob, pBase:side === 'above' ? o.pBase : 1 - o.pBase, lean:o.lean, sdUsd:o.sdUsd, volMult:o.mult, mu:o.mu, momMode:o.momMode, entryPrice:o.S, entryPerSec:o.perSec, volCands:o.volCands, kalshi:kalshiSnapshot(side, o), origContracts:contracts, status:'open', auto:!!opts.auto, tier:opts.tier || null, reentry:isReentry, liqTrigger:!!opts.liqTrigger,
     baseEdge:Math.round(((side === 'above' ? o.pManual : 1 - o.pManual) - 0.5) * 1000) / 10,
     fx:(o.mom && o.mom.items) ? o.mom.items.map(function(x){ return [x.name, Math.round(x.lean * 100) / 100]; }) : null,
     divPct:(function(){ var d = priceDivergence(); return d ? Math.round(d.pct * 1000) / 1000 : null; })()};
@@ -3727,7 +3734,7 @@ function renderLedger(){
   rows.forEach(function(b){
     var tr = document.createElement('tr');
     function td(text, cls){ var c = document.createElement('td'); c.textContent = text; if (cls) c.className = cls; tr.appendChild(c); return c; }
-    var c1 = td(((b.auto ? 'auto \u00b7 ' : '') + (b.reentry ? 're-entry \u00b7 ' : '')) + (b.side === 'above' ? 'over ' : 'under ') + fmt(b.strike, 0), b.side === 'above' ? 'up' : 'down');
+    var c1 = td(((b.auto ? 'auto \u00b7 ' : '') + (b.liqTrigger ? 'liq-sweep \u00b7 ' : '') + (b.reentry ? 're-entry \u00b7 ' : '')) + (b.side === 'above' ? 'over ' : 'under ') + fmt(b.strike, 0), b.side === 'above' ? 'up' : 'down');
     editButton(b, c1);
     td(fmtTime(b.expiry));
     td(typeof b.leftMs === 'number' ? fmtLeft(b.leftMs) : '\u2014', 'val');
@@ -4861,6 +4868,35 @@ function autoCheck(){
   if (strikeSetAt < o.E - P){ autoWhy = 'Armed. Waiting for a strike for this window: type one, or enter the BRTI at the last close.'; autoHold = null; autoStatusText(); return; }
   if (paper.bets.some(function(b){ return b.status === 'canceled' && b.auto && b.expiry === o.E; })){ autoWhy = 'You cancelled the auto bet in this window, so auto-trading is waiting for the next one.'; autoHold = null; autoStatusText(); return; }
   if (left < 15000){ autoWhy = 'Too close to expiry. Waiting for the next window.'; autoHold = null; autoStatusText(); return; }
+  /* Liquidity-sweep instant trigger: tried first, every tick, ahead of the normal gated flow below.
+     A strong CVD-confirmed sweep picks its OWN side (the direction the sweep implies), skips the
+     window-timing / signal-strength / indicator-vote / trend / re-entry / "near a key level" gates
+     (a sweep inherently fires at a key level and is itself the signal, so those would mostly just
+     block it), and skips the usual multi-second hold-for-confirmation delay -- the whole point is
+     speed. It still has to clear the rest of gateChecklist: price-adjustment stability, strike
+     sanity, the Kalshi edge/contract-price bounds, and the same-side loss-streak breaker. If it
+     doesn't fire (toggle off, no sweep, or a kept gate fails), this falls through to the normal
+     flow unchanged. */
+  if ($('autoLiqTrigger') && $('autoLiqTrigger').checked){
+    var liqSig = liquiditySweepSignal(), wickNeed = +$('liqTriggerWick').value || 0.65;
+    if (liqSig && liqSig.active && liqSig.confirmed && liqSig.wickFrac >= wickNeed){
+      var liqSide = liqSig.dir > 0 ? 'above' : 'below';
+      if (!hasOpenThisExpiry(liqSide)){
+        var LIQ_TRIGGER_SKIP = ['Window timing', 'Fast vs slow indicators', 'Signal strength', 'Edge before momentum', 'Momentum agrees', 'Indicator votes', 'Trend gate', 'Re-entry', 'Support/resistance', 'Volume POC', 'Volume confirmation', 'Intra-window consistency'];
+        var liqChecklist = gateChecklist(liqSide, o, left).filter(function(c){ return !LIQ_TRIGGER_SKIP.some(function(s){ return c.label.indexOf(s) === 0; }); });
+        var liqFail = liqChecklist.find(function(c){ return !c.pass; });
+        if (!liqFail){
+          var baseLiq = Math.max(1, Math.floor(parseFloat($('stake').value) || 0)), streakLiq = lossStreak();
+          var throttleLiq = streakLiq >= 5 ? 0.25 : (streakLiq >= 3 ? 0.5 : 1);
+          var contractsLiq = Math.max(1, Math.round(baseLiq * throttleLiq));
+          var okLiq = placeBet(liqSide, {auto:true, contracts:contractsLiq, tier:tierOf(Math.abs(o.pAbove - 0.5) * 100), liqTrigger:true});
+          autoHold = null;
+          if (okLiq) autoLast = '[auto, liquidity-sweep trigger] ' + lastPlaceMsg + (throttleLiq < 1 ? ' (sized down after ' + streakLiq + ' losses in a row)' : '');
+          autoWhy = ''; autoStatusText(); return;
+        }
+      }
+    }
+  }
   var side = o.pAbove >= 0.5 ? 'above' : 'below';
   if (hasOpenThisExpiry(side)){ autoWhy = 'Already have a bet for this expiry.'; autoHold = null; autoStatusText(); return; }
   var checklist = gateChecklist(side, o, left);
@@ -5252,6 +5288,10 @@ $('useEthBtc').checked = get('cs_use_ethbtc_v1', '0') === '1';
 $('useEthBtc').addEventListener('change', function(){ put('cs_use_ethbtc_v1', $('useEthBtc').checked ? '1' : '0'); if ($('useEthBtc').checked) ethBtcPoll(); else { ethBtc.candles5 = null; ethBtc.msg = ''; } renderEthBtc(); tick(); });
 $('useLiqSweep').checked = get('cs_use_liqsweep_v1', '1') === '1';
 $('useLiqSweep').addEventListener('change', function(){ put('cs_use_liqsweep_v1', $('useLiqSweep').checked ? '1' : '0'); renderLiqSweepNote(); tick(); });
+$('autoLiqTrigger').checked = get('cs_auto_liqtrigger_v1', '0') === '1';
+$('autoLiqTrigger').addEventListener('change', function(){ put('cs_auto_liqtrigger_v1', $('autoLiqTrigger').checked ? '1' : '0'); });
+$('liqTriggerWick').value = get('cs_liqtrigger_wick_v1', '0.65');
+$('liqTriggerWick').addEventListener('change', function(){ put('cs_liqtrigger_wick_v1', $('liqTriggerWick').value); });
 $('useCoinbaseAcct').checked = get('cs_use_coinbase_acct_v1', '0') === '1';
 $('useCoinbaseAcct').addEventListener('change', function(){ put('cs_use_coinbase_acct_v1', $('useCoinbaseAcct').checked ? '1' : '0'); if ($('useCoinbaseAcct').checked) coinbaseAcctPoll(); else { coinbaseAcct.data = null; coinbaseAcct.error = null; } renderCoinbaseAcct(); });
 $('coinbaseCashOverride').value = get('cs_coinbase_cash_override_v1', '');
