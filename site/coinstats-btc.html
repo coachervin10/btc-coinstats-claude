@@ -344,6 +344,8 @@ body.view-simple .adv{ display:none !important; }
         <div class="prob-meta" id="flowNote" style="margin-top:8px;"></div>
         <label class="row" style="margin-top:10px;"><input type="checkbox" id="useEthBtc"><span>add ETH/BTC relative strength as its own vote &mdash; is ETH outperforming or underperforming BTC right now, read as broad crypto-market risk-on/risk-off strength rather than BTC's own (correlated) momentum. Off by default; a genuinely different signal from everything else here, but a new and untested one.</span></label>
         <div class="prob-meta" id="ethBtcNote" style="margin-top:4px;"></div>
+        <label class="row" style="margin-top:10px;" id="liqSweepRow"><input type="checkbox" id="useLiqSweep" checked><span>add a liquidity-sweep vote &mdash; when the last closed 1-min bar pokes through the prior 20 bars' high or low and closes back inside (a long wick, not a real breakout), this votes for a reversal the other way. Full strength only when taker flow (CVD) isn't also pushing in the swept direction; muted otherwise.</span></label>
+        <div class="prob-meta" id="liqSweepNote" style="margin-top:4px;"></div>
       </div>
 
       <div class="card adv" id="card-chart">
@@ -2394,7 +2396,7 @@ function cdcSignals(){
       var ref = (tapeLast && now - tapeLast * 1000 <= 45000) ? tapeAt(tapeLast * 1000 + 999) : hr[hr.length - 1].close;
       if (ref != null){
         out.vwapDev = (ref - out.vwap) / out.vwap;
-        out.vwapLean = clamp(out.vwapDev / (2 * (vol ? vol.slow : 0.0008) * Math.sqrt(6)), -1, 1);
+        out.vwapLean = clamp(out.vwapDev / (2 * (vol ? vol.slow : 0.0008) * Math.sqrt(12)), -1, 1);  // 12 5-min steps = the ~60-min VWAP window below, not the 30-min window the old sqrt(6) was copied from
       }
     }
   }
@@ -2595,6 +2597,47 @@ function computeBarIndicators(){
   return out;
 }
 function signedPct(v, d){ return (v >= 0 ? '+' : '\u2212') + Math.abs(v * 100).toFixed(d); }
+/* ---------- liquidity sweep ----------
+   A sweep: price pokes through a recent swing high/low -- where stop-losses and resting orders
+   cluster -- then fails to hold and closes back inside the old range: a long wick with a small body
+   at the extreme, not a real breakout. Read off the last CLOSED 1-min bar (never the one still
+   forming) against the high/low of the 20 bars before it, so this reacts within about a minute
+   instead of waiting on a 15-min bar to close, which is the point of it. Confirmed with CVD: if
+   taker flow over this window is still pushing the SAME way as the swept side, the break might be
+   real continuation rather than an absorbed sweep, so the vote is muted rather than dropped (a sweep
+   with no CVD data yet, or with CVD not actively fighting it, still counts, just not at full strength). */
+function liquiditySweepSignal(){
+  if (!$('useLiqSweep') || !$('useLiqSweep').checked) return null;
+  if (!$('useCdc').checked || !cdc.candles1 || cdc.candles1.length < 22) return null;
+  var closed = cdc.candles1.slice(0, -1);               // drop the bar still forming
+  var bars = closed.slice(-21);
+  if (bars.length < 21) return null;
+  var sweepBar = bars[bars.length - 1], lookback = bars.slice(0, bars.length - 1);
+  var swingHigh = Math.max.apply(null, lookback.map(function(b){ return b.high; }));
+  var swingLow = Math.min.apply(null, lookback.map(function(b){ return b.low; }));
+  var range = sweepBar.high - sweepBar.low;
+  if (!(range > 0)) return null;
+  var upperWick = sweepBar.high - Math.max(sweepBar.open, sweepBar.close);
+  var lowerWick = Math.min(sweepBar.open, sweepBar.close) - sweepBar.low;
+  var sweptHigh = sweepBar.high > swingHigh && sweepBar.close < swingHigh && upperWick / range > 0.5;
+  var sweptLow = sweepBar.low < swingLow && sweepBar.close > swingLow && lowerWick / range > 0.5;
+  if (!sweptHigh && !sweptLow) return {active:false, barTs:sweepBar.ts};
+  var dir = sweptHigh ? -1 : 1;                          // swept the high: expect reversal down. swept the low: expect reversal up.
+  var wickFrac = Math.min(1, (sweptHigh ? upperWick : lowerWick) / range);
+  var cvdSig = cvdSignal(), confirmed = true;
+  if (cvdSig) confirmed = dir > 0 ? cvdSig.lean <= 0.15 : cvdSig.lean >= -0.15;  // flow isn't still pushing the swept direction
+  var lean = dir * clamp(0.5 + wickFrac * 0.5, 0, 1) * (confirmed ? 1 : 0.4);
+  return {active:true, dir:dir, lean:lean, confirmed:confirmed, wickFrac:wickFrac, level:sweptHigh ? swingHigh : swingLow, cvdSig:cvdSig, barTs:sweepBar.ts};
+}
+function renderLiqSweepNote(){
+  var el = $('liqSweepNote'); if (!el) return;
+  if (!$('useLiqSweep') || !$('useLiqSweep').checked){ el.textContent = ''; return; }
+  if (!$('useCdc').checked){ el.textContent = 'Needs Crypto.com 1-min candles (turn on "use Crypto.com..." above).'; return; }
+  var r = liquiditySweepSignal();
+  if (!r){ el.textContent = 'Waiting for enough 1-min bars.'; return; }
+  if (!r.active){ el.textContent = 'No sweep on the last closed 1-min bar.'; return; }
+  el.textContent = 'Swept the prior-20-bar ' + (r.dir < 0 ? 'high' : 'low') + ' (' + fmt(r.level, 0) + '), wick ' + (r.wickFrac * 100).toFixed(0) + '% of the bar, ' + (r.confirmed ? 'CVD not fighting it \u2014 full weight' : 'but CVD still pushing that way \u2014 muted') + '. Leaning ' + (r.dir < 0 ? 'down' : 'up') + '.';
+}
 var momMemo = null;
 function computeMomentum(){                      // the open bets and the display all ask for it each second, so it is computed once per half second
   var now = Date.now();
@@ -2735,6 +2778,12 @@ function computeMomentumRaw(){
     var skewName = 'Deribit 25-delta skew';
     items.push({name:skewName, src:'Deribit', val:(skewSig.skew >= 0 ? '+' : '−') + Math.abs(skewSig.skew).toFixed(2) + ' vol pts (' + (skewSig.skew >= 0 ? 'puts richer' : 'calls richer') + ')', lean:skewSig.lean});
     factors.push(wl(skewName, skewSig.lean));                                 // which way the options market expects a move, not just how big -- its own vote
+  }
+  var liqSig = liquiditySweepSignal();
+  if (liqSig && liqSig.active){
+    var liqName = 'Liquidity sweep, last 1-min bar';
+    items.push({name:liqName, src:'Crypto.com, 1m', val:'swept ' + (liqSig.dir < 0 ? 'high' : 'low') + ' @ ' + fmt(liqSig.level, 0) + (liqSig.confirmed ? '' : ' (muted, flow still pushing)'), lean:liqSig.lean});
+    factors.push(wl(liqName, liqSig.lean));                                   // a distinct, price-action-based reversal read -- its own vote, not merged with the trend/oscillator groups
   }
   var comp = factors.reduce(function(a, x){ return a + x; }, 0) / factors.length;
   return {items:items, composite:comp, factors:factors.length, votes:factors.slice(), spike:!!(sig && sig.spike), sig:sig};
@@ -4060,6 +4109,7 @@ function tick(){
   try { shadowCheckCap(); renderShadow(); } catch (e) { /* rehearsal feature only -- never let it break the main tick */ }
   try { renderKellyPreview(); } catch (e) { /* display only -- never let it break the main tick */ }
   try { renderEthBtc(); } catch (e) { /* display only -- never let it break the main tick */ }
+  try { renderLiqSweepNote(); } catch (e) { /* display only -- never let it break the main tick */ }
   try { renderCoinbaseAcct(); } catch (e) { /* display only -- never let it break the main tick */ }
   recordWindow();
   autoCloseCheck();
@@ -4508,7 +4558,7 @@ function intraWindowConsistency(side, E){
    there's enough real candle history. */
 function volumeProfile(){
   var bars = (cdc.candles15 && cdc.candles15.length >= 20) ? cdc.candles15.slice(-64)
-    : (cdc.candles5 && cdc.candles5.length >= 20) ? cdc.candles5.slice(-96)
+    : (cdc.candles && cdc.candles.length >= 20) ? cdc.candles.slice(-96)      // the 5-min array is cdc.candles, not cdc.candles5 -- that property never existed, so this branch could never fire
     : (cdc.candles1 && cdc.candles1.length >= 30) ? cdc.candles1.slice(-180)
     : null;
   if (!bars) return null;
@@ -5200,6 +5250,8 @@ $('useDeribitIv').checked = get('cs_use_deribit_iv_v1', '1') !== '0';
 $('useDeribitIv').addEventListener('change', function(){ put('cs_use_deribit_iv_v1', $('useDeribitIv').checked ? '1' : '0'); if ($('useDeribitIv').checked) deribitPoll(); else { deribitIv.data = null; } tick(); });
 $('useEthBtc').checked = get('cs_use_ethbtc_v1', '0') === '1';
 $('useEthBtc').addEventListener('change', function(){ put('cs_use_ethbtc_v1', $('useEthBtc').checked ? '1' : '0'); if ($('useEthBtc').checked) ethBtcPoll(); else { ethBtc.candles5 = null; ethBtc.msg = ''; } renderEthBtc(); tick(); });
+$('useLiqSweep').checked = get('cs_use_liqsweep_v1', '1') === '1';
+$('useLiqSweep').addEventListener('change', function(){ put('cs_use_liqsweep_v1', $('useLiqSweep').checked ? '1' : '0'); renderLiqSweepNote(); tick(); });
 $('useCoinbaseAcct').checked = get('cs_use_coinbase_acct_v1', '0') === '1';
 $('useCoinbaseAcct').addEventListener('change', function(){ put('cs_use_coinbase_acct_v1', $('useCoinbaseAcct').checked ? '1' : '0'); if ($('useCoinbaseAcct').checked) coinbaseAcctPoll(); else { coinbaseAcct.data = null; coinbaseAcct.error = null; } renderCoinbaseAcct(); });
 $('coinbaseCashOverride').value = get('cs_coinbase_cash_override_v1', '');
