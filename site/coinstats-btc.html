@@ -688,6 +688,27 @@ body.view-simple .adv{ display:none !important; }
         <div class="note plain" id="closeNote"></div>
       </div>
 
+      <div class="card collapsed adv" id="card-stoploss">
+        <div class="card-head" id="head-stoploss"><h2>Stop-loss analysis</h2><span class="card-chevron">▾</span></div>
+        <div class="note" style="margin-top:0; padding-top:0;">
+          For every bet a stop loss actually closed, this compares what you got against what holding to expiry
+          would have paid (the same held-to-expiry check as the Track record card above), grouped by the
+          effective stop percentage that fired &mdash; vol-scaling and the trailing stop both shift that a bit off
+          whatever the &ldquo;Stop loss&rdquo; setting says, so bets are bucketed to the nearest 5%.
+        </div>
+        <table style="margin-top:10px;">
+          <thead><tr><th>Effective stop</th><th class="val">Bets</th><th class="val">Would&rsquo;ve won by holding</th><th class="val">Edge vs holding</th><th class="val">Avg / bet</th></tr></thead>
+          <tbody id="stopAnalysisBody"><tr><td colspan="5" style="color:var(--dim)">No stop-loss closes yet.</td></tr></tbody>
+        </table>
+        <div class="note plain" id="stopAnalysisNote"></div>
+        <div class="note">
+          A positive edge means the stop saved money versus just holding the contract to expiry; a negative one means
+          it cashed out bets that would have come back on their own. This can only compare percentages you have
+          actually used &mdash; it will never suggest a value you haven&rsquo;t tried, and right now that is probably
+          just whatever the &ldquo;Stop loss&rdquo; setting already is, since nothing here varies it for you yet.
+        </div>
+      </div>
+
       <div class="card collapsed adv" id="card-kalshiofficial">
         <div class="card-head" id="head-kalshiofficial"><h2>Kalshi official values</h2><span class="card-chevron">▾</span></div>
         <div class="note" style="margin-top:0; padding-top:0;">
@@ -3548,6 +3569,55 @@ function renderDrift(){
   if (!d.enough){ el.textContent = 'Needs at least ' + d.need + ' decided bets to compare (have ' + d.have + ').'; return; }
   el.textContent = 'Last ' + d.recent.n + ': ' + Math.round(d.recent.hit * 100) + '% hit, plausibly ' + pctRange(d.recent.ci) + ' (avg odds ' + Math.round(d.recent.odds * 100) + '%) vs. prior ' + d.prior.n + ': ' + Math.round(d.prior.hit * 100) + '% hit, plausibly ' + pctRange(d.prior.ci) + ' (avg odds ' + Math.round(d.prior.odds * 100) + '%) \u2014 ' + d.read + '.';
 }
+/* Groups every stop-closed bet by the EFFECTIVE stop percentage that fired (b.stopPct, already adjusted
+   for vol-scaling / the trailing stop, not just whatever the "Stop loss" setting says) and compares the
+   result against b.heldPnl -- the same held-to-expiry counterfactual the Track record card above uses for
+   "holding would have been...". A positive edge means the stop paid for itself; negative means it closed
+   bets that would have come back. Only buckets that have actually fired historically can show up here. */
+function renderStopAnalysis(){
+  var tb = $('stopAnalysisBody'), note = $('stopAnalysisNote');
+  if (!tb) return;
+  var rows = paper.bets.filter(function(b){ return b.closeReason === 'stop' && typeof b.stopPct === 'number'; });
+  if (!rows.length){
+    tb.innerHTML = '<tr><td colspan="5" style="color:var(--dim)">No stop-loss closes yet.</td></tr>';
+    if (note) note.textContent = '';
+    return;
+  }
+  var groups = {};
+  rows.forEach(function(b){
+    var key = Math.round(b.stopPct / 5) * 5;
+    (groups[key] = groups[key] || []).push(b);
+  });
+  var keys = Object.keys(groups).map(Number).sort(function(a, b){ return a - b; });
+  var bucketEdge = {};
+  tb.innerHTML = '';
+  keys.forEach(function(k){
+    var list = groups[k], chk = list.filter(function(b){ return b.heldPnl != null; });
+    var wouldWon = chk.filter(function(b){ return b.heldPnl > b.pnl; }).length;
+    var edge = chk.length ? chk.reduce(function(a, b){ return a + (b.pnl - b.heldPnl); }, 0) : null;
+    bucketEdge[k] = {edge:edge, n:chk.length};
+    var tr = document.createElement('tr');
+    function td(text, cls){ var c = document.createElement('td'); c.textContent = text; if (cls) c.className = cls; tr.appendChild(c); return c; }
+    td('~' + k + '%');
+    td(String(list.length), 'val');
+    td(chk.length ? (wouldWon / chk.length * 100).toFixed(0) + '% of ' + chk.length : '—', 'val');
+    var et = td(chk.length ? (edge >= 0 ? '+' : '−') + '$' + Math.abs(edge).toFixed(2) : 'not compared yet', 'val');
+    if (chk.length) et.style.color = edge >= 0 ? 'var(--up)' : 'var(--down)';
+    td(chk.length ? money(edge / chk.length) : '—', 'val');
+    tb.appendChild(tr);
+  });
+  if (!note) return;
+  var MIN_SAMPLE = 15;
+  var qualified = keys.filter(function(k){ return bucketEdge[k].n >= MIN_SAMPLE; });
+  if (!qualified.length){
+    var have = Math.max.apply(null, keys.map(function(k){ return bucketEdge[k].n; }));
+    note.textContent = 'Needs at least ' + MIN_SAMPLE + ' held-to-expiry comparisons in one bucket before any stop percentage looks meaningfully better than another (most so far: ' + have + ').';
+  } else {
+    qualified.sort(function(a, b){ return (bucketEdge[b].edge / bucketEdge[b].n) - (bucketEdge[a].edge / bucketEdge[a].n); });
+    var top = qualified[0], e = bucketEdge[top];
+    note.textContent = '~' + top + '% has the best track record so far: averaged ' + money(e.edge / e.n) + ' per bet versus just holding to expiry, across ' + e.n + ' comparisons. Still one slice of market conditions — a lead, not a verdict.';
+  }
+}
 function renderLedger(){
   $('balance').textContent = money(paper.balance);
   $('balance').style.color = paper.balance >= 1000 ? 'var(--up)' : 'var(--down)';
@@ -3599,6 +3669,8 @@ function renderLedger(){
     d.textContent = g.length ? (g.reduce(function(acc, x){ return acc + x.prob; }, 0) / g.length * 100).toFixed(0) + '%' : '\u2014';
     tr.appendChild(a); tr.appendChild(c); tr.appendChild(d); tbT.appendChild(tr);
   });
+
+  renderStopAnalysis();
 
   var tb = $('ledger'); tb.innerHTML = '';
   var rows = paper.bets.filter(function(b){ return b.status !== 'canceled'; }).slice(-10).reverse();
@@ -3871,7 +3943,7 @@ function minBaseNow(){ return +$('autoMinBase').value || 0; }
    the page or stops it from updating in the background -- a collapsed card's numbers stay live underneath. */
 var COLLAPSIBLE_CARDS = [
   ['orderflow', true], ['chart', true], ['entryrules', true], ['trendstreak', true], ['reentry', true], ['scalein', true],
-  ['cancelled', true], ['winhist', true], ['exchanges', true], ['brtiavg', true], ['sync', true], ['livefetch', true], ['calibration', true], ['kalshiofficial', true]
+  ['cancelled', true], ['winhist', true], ['exchanges', true], ['brtiavg', true], ['sync', true], ['livefetch', true], ['calibration', true], ['kalshiofficial', true], ['stoploss', true]
 ];
 function setupCollapsibleCards(){
   COLLAPSIBLE_CARDS.forEach(function(pair){
