@@ -856,8 +856,9 @@ body.view-simple .adv{ display:none !important; }
           <label for="syncTokenBox" class="prob-meta">Sync token</label>
           <input type="text" id="syncTokenBox" style="width:280px; font-size:.78rem;" aria-label="Your sync token">
           <button type="button" class="mini" id="copyToken">Copy</button>
+          <button type="button" class="mini" id="loadTokenBtn">Load this token</button>
         </div>
-        <div class="prob-meta" style="margin-bottom:10px;">Paste this exact token into the same field on another browser or device to share this paper-trading history there. Anyone with this token can read or overwrite this history, so treat it like a password.</div>
+        <div class="prob-meta" style="margin-bottom:10px;">Paste this exact token into the same field on another browser or device, then click "Load this token," to share this paper-trading history there. Anyone with this token can read or overwrite this history, so treat it like a password.</div>
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
           <button type="button" class="mini" id="syncNow">Sync now</button>
           <button type="button" class="mini" id="exportBtn">Export my data</button>
@@ -5332,15 +5333,23 @@ if (sessionClosed) $('live').checked = false;
 sessionUI();
 $('syncOn').checked = get('cs_sync_on_v1', '1') !== '0';
 $('syncTokenBox').value = syncToken();
-$('syncTokenBox').addEventListener('change', function(){
+/* Switching tokens used to depend entirely on the field firing a "change" event (i.e. losing
+   focus after an edit) -- easy to miss by pasting then clicking a button, which doesn't always
+   fire it, and there was no visible button for this at all, so nothing seemed to happen. Pulled
+   into its own function so a dedicated, always-clickable "Load this token" button (below) does
+   the exact same thing on demand, instead of relying on blur timing. */
+function switchToToken(){
   var v = $('syncTokenBox').value.trim();
-  if (!/^[A-Za-z0-9_-]{16,128}$/.test(v)){ syncStatus('That token looks too short/invalid; left unchanged.'); $('syncTokenBox').value = syncToken(); return; }
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(v)){ syncStatus('That token looks too short/invalid (expected 16–128 letters/digits/-/_, no spaces); left unchanged.'); $('syncTokenBox').value = syncToken(); return; }
+  if (v === syncToken()){ syncStatus('That’s already the token in use here.'); return; }
   if (!confirm('Switching tokens will load that token’s saved data into this browser, replacing what’s here now (if any). Continue?')){ $('syncTokenBox').value = syncToken(); return; }
   try { localStorage.setItem('cs_sync_token_v1', v); } catch (e) {}
   sync.ready = false; sync.lastHash = null;
   syncStatus('Token updated. Loading data saved under it…');
   pullFromRemote();
-});
+}
+$('syncTokenBox').addEventListener('change', switchToToken);
+$('loadTokenBtn').addEventListener('click', switchToToken);
 $('copyToken').addEventListener('click', function(){
   var box = $('syncTokenBox');
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(box.value).then(function(){ syncStatus('Token copied. Paste it into the same field on your other browser.'); }, function(){ box.focus(); box.select(); syncStatus('Select the token and copy it yourself (Ctrl+C or Cmd+C).'); });
