@@ -4782,7 +4782,7 @@ function autoCheck(){
    last write wins. Fine for one person using one or two browsers at a time; if you actively trade from two devices
    at once, pulls can clobber a concurrent push. Use one at a time, same as the original version recommended. */
 var SYNC_SKIP = {cs_only_live_v1:1, cs_auto_on_v1:1, cs_only_calls_v1:1, cs_sync_meta_v1:1, cs_sync_on_v1:1, cs_device_v1:1, cs_sync_force_v1:1, cs_sync_token_v1:1};
-var PUSH_DELAY_MS = 4000, POLL_MS = 30000;
+var PUSH_DELAY_MS = 4000, POLL_MS = 30000, FORCE_SAVE_MS = 15 * 60000;
 var syncFrozen = false;
 function syncKey(k){ return typeof k === 'string' && k.indexOf('cs_') === 0 && !SYNC_SKIP[k]; }
 function localSnapshot(){
@@ -4893,6 +4893,12 @@ function syncInit(){
   if (!syncOn()){ syncStatus('Sync is off. Your data stays in this browser only.'); return; }
   syncCheck(true);
   if (!sync.pollTimer) sync.pollTimer = setInterval(function(){ if (!document.hidden) syncCheck(false); }, POLL_MS);
+  /* Belt-and-suspenders on top of the push-on-change above (which already saves within a few
+     seconds of any edit): a forced save every 15 minutes regardless of whether anything actually
+     changed, so there's never more than 15 minutes between this browser and the account's copy,
+     even if a change somehow didn't trigger its own push. Runs even while the tab is in the
+     background, unlike the poll above, since the point is a reliability guarantee. */
+  if (!sync.forceTimer) sync.forceTimer = setInterval(function(){ pushNow(true); }, FORCE_SAVE_MS);
 }
 
 /* ---------- export and import ---------- */
